@@ -7,11 +7,14 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
+local DashCategory = require(Shared.Enums.DashCategory)
 local MovementConstants = require(Shared.Constants.MovementConstants)
+local classifyDashCategory = require(Shared.Utils.ClassifyDashCategory)
+local newDashCooldownStates = require(Shared.Utils.NewDashCooldownStates)
+local DashCategoryMovementStates = require(Shared.Utils.DashCategoryMovementStates)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local regenCharges = require(Shared.Utils.RegenCharges)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local DashSignals = require(script.Parent.Parent.State.DashSignals)
 local MovementController = require(script.Parent.MovementController)
 
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent
@@ -33,10 +36,12 @@ export type DashController = typeof(setmetatable(
 		_velocity: LinearVelocity?,
 		_steerConnection: RBXScriptConnection?,
 		_dashEndThread: thread?,
-		_lastDashTime: number,
+		_dodgeCancelEndThread: thread?,
+		_dashCooldowns: { [string]: newDashCooldownStates.DashCooldownState },
+		_lastDashCategory: string,
+		_dashStartTime: number,
 		_rollCancelCharges: number,
 		_rollCancelChargeRegenStart: number,
-		_lastDashCooldownResetAt: number,
 	},
 	DashController
 ))
@@ -55,10 +60,12 @@ function DashController.new(): DashController
 		_velocity = nil,
 		_steerConnection = nil,
 		_dashEndThread = nil,
-		_lastDashTime = -math.huge,
+		_dodgeCancelEndThread = nil,
+		_dashCooldowns = newDashCooldownStates(),
+		_lastDashCategory = DashCategory.Forward,
+		_dashStartTime = -math.huge,
 		_rollCancelCharges = MovementConstants.RollCancelMaxCharges,
 		_rollCancelChargeRegenStart = os.clock(),
-		_lastDashCooldownResetAt = -math.huge,
 	}, DashController)
 
 	return self
@@ -68,6 +75,13 @@ function DashController._cancelDashEndThread(self: DashController)
 	if self._dashEndThread then
 		task.cancel(self._dashEndThread)
 		self._dashEndThread = nil
+	end
+end
+
+function DashController._cancelDodgeCancelEndThread(self: DashController)
+	if self._dodgeCancelEndThread then
+		task.cancel(self._dodgeCancelEndThread)
+		self._dodgeCancelEndThread = nil
 	end
 end
 
@@ -103,6 +117,7 @@ end
 
 function DashController._resetForNewCharacter(self: DashController)
 	self:_cancelDashEndThread()
+	self:_cancelDodgeCancelEndThread()
 
 	if self._steerConnection then
 		self._steerConnection:Disconnect()
@@ -128,6 +143,7 @@ function DashController._beginDash(self: DashController, humanoid: Humanoid, roo
 	local startSpeed = MovementConstants.DashPower
 	local endSpeed = humanoid.WalkSpeed
 	local startTime = os.clock()
+	self._dashStartTime = startTime
 
 	-- Locked in from whatever's held the instant the dash starts (no input at all defaults to a
 	-- backstep, -LookVector) -- the Heartbeat below only ever UPDATES this while input is still
@@ -155,7 +171,7 @@ function DashController._beginDash(self: DashController, humanoid: Humanoid, roo
 
 	self._dashEndThread = task.delay(MovementConstants.DashDuration, function()
 		self._dashEndThread = nil
-		if movementFSM:GetState() == MovementState.Dashing then
+		if MovementConstants.DashingStates[movementFSM:GetState()] then
 			MovementController:RefreshMovementState()
 		end
 	end)
@@ -163,25 +179,31 @@ end
 
 function DashController._tryDash(self: DashController, humanoid: Humanoid, rootPart: BasePart)
 	local now = os.clock()
-	if now - self._lastDashTime < MovementConstants.DashCooldown then
+	local category = classifyDashCategory(humanoid.MoveDirection, rootPart.CFrame.LookVector, rootPart.CFrame.RightVector)
+	local cooldown = self._dashCooldowns[category]
+
+	if now - cooldown.lastDashTime < MovementConstants.DashCooldowns[category] then
 		return
 	end
 
-	if MovementConstants.LockedMovementStates[movementFSM:GetState()] then
+	local currentState = movementFSM:GetState()
+	local isDashCategorySwitch = MovementConstants.DashingStates[currentState]
+		and category ~= self._lastDashCategory
+		and now - self._dashStartTime >= MovementConstants.DashCategorySwitchDelay
+
+	if not isDashCategorySwitch and MovementConstants.LockedMovementStates[currentState] then
 		return
 	end
 
-	self._lastDashTime = now
-	movementFSM:TransitionTo(MovementState.Dashing)
-	requestDash:FireServer()
+	cooldown.lastDashTime = now
+	self._lastDashCategory = category
+	movementFSM:TransitionTo(DashCategoryMovementStates[category])
+	requestDash:FireServer(category)
 	self:_beginDash(humanoid, rootPart)
 end
 
--- Right-click mid-dash: cuts the dash short in exchange for control back immediately, at the cost
--- of a charge -- also resets the dash's own cooldown, but only once per DashCooldown window, so
--- chaining cancel -> instant re-dash -> cancel again doesn't grant a second reset.
 function DashController._tryRollCancel(self: DashController)
-	if movementFSM:GetState() ~= MovementState.Dashing then
+	if not MovementConstants.DashingStates[movementFSM:GetState()] then
 		return
 	end
 
@@ -199,14 +221,21 @@ function DashController._tryRollCancel(self: DashController)
 	end
 	self._rollCancelCharges -= 1
 
-	if now - self._lastDashCooldownResetAt >= MovementConstants.DashCooldown then
-		self._lastDashTime = -math.huge
-		self._lastDashCooldownResetAt = now
+	local cooldown = self._dashCooldowns[self._lastDashCategory]
+	if now - cooldown.lastDashCooldownResetAt >= MovementConstants.DashCooldowns[self._lastDashCategory] then
+		cooldown.lastDashTime = -math.huge
+		cooldown.lastDashCooldownResetAt = now
 	end
 
 	requestRollCancel:FireServer()
-	DashSignals.Cancelled:Fire()
-	MovementController:RefreshMovementState()
+	movementFSM:TransitionTo(MovementState.DodgeCancelling)
+
+	self._dodgeCancelEndThread = task.delay(MovementConstants.DodgeCancelRecoveryTime, function()
+		self._dodgeCancelEndThread = nil
+		if movementFSM:GetState() == MovementState.DodgeCancelling then
+			MovementController:RefreshMovementState()
+		end
+	end)
 end
 
 function DashController._setupCharacter(self: DashController, character: Model)
@@ -216,10 +245,11 @@ function DashController._setupCharacter(self: DashController, character: Model)
 	disconnectAll(self._connections)
 	self:_resetForNewCharacter()
 
-	self._lastDashTime = -math.huge
+	self._dashCooldowns = newDashCooldownStates()
+	self._lastDashCategory = DashCategory.Forward
+	self._dashStartTime = -math.huge
 	self._rollCancelCharges = MovementConstants.RollCancelMaxCharges
 	self._rollCancelChargeRegenStart = os.clock()
-	self._lastDashCooldownResetAt = -math.huge
 
 	local attachment = Instance.new("Attachment")
 	attachment.Name = "DashAttachment"
@@ -240,7 +270,7 @@ function DashController._setupCharacter(self: DashController, character: Model)
 	table.insert(
 		self._connections,
 		movementFSM.Changed:Connect(function(_newState: string, oldState: string)
-			if oldState == MovementState.Dashing then
+			if MovementConstants.DashingStates[oldState] then
 				self:_stopPhysics(humanoid, rootPart)
 			end
 		end)

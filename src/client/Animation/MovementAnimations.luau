@@ -13,6 +13,8 @@ local MovementAnimations: { [string]: Animation } = table.freeze({
 	[MovementState.LightLanding] = basicMovementFolder:WaitForChild("LightLanding") :: Animation,
 	[MovementState.HeavyLanding] = basicMovementFolder:WaitForChild("HeavyLanding") :: Animation,
 	[MovementState.Sliding] = basicMovementFolder:WaitForChild("Sliding") :: Animation,
+	[MovementState.Crouching] = basicMovementFolder:WaitForChild("Crouching") :: Animation,
+	[MovementState.CrouchWalking] = basicMovementFolder:WaitForChild("CrouchWalking") :: Animation,
 })
 
 return MovementAnimations

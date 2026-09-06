@@ -18,11 +18,29 @@
         "RequestDash": {
           "$className": "RemoteEvent"
         },
+        "RequestAirDash": {
+          "$className": "RemoteEvent"
+        },
+        "RequestDoubleJump": {
+          "$className": "RemoteEvent"
+        },
+        "RequestLedgeJump": {
+          "$className": "RemoteEvent"
+        },
         "RequestRollCancel": {
           "$className": "RemoteEvent"
         },
         "RequestSlide": {
           "$className": "RemoteEvent"
+        },
+        "RequestCrouch": {
+          "$className": "RemoteEvent"
+        },
+        "NotifyFootstep": {
+          "$className": "UnreliableRemoteEvent"
+        },
+        "PlayFootstepSFX": {
+          "$className": "UnreliableRemoteEvent"
         }
       }
     },

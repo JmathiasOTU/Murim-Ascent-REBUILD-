@@ -53,11 +53,6 @@ function MovementController._setupCharacter(self: MovementController, character:
 
 	disconnectAll(self._connections)
 
-	-- Facing is locked to the camera (below) instead of MoveDirection, so directional
-	-- animations can tell forward/back/strafe apart; the default auto-face-movement
-	-- behavior would otherwise always keep the character's forward aligned with travel.
-	humanoid.AutoRotate = false
-
 	local function updateMovementState()
 		local isMoving = humanoid.MoveDirection.Magnitude > 0
 		local isSprinting = isMoving and self._isSprintKeyHeld
@@ -97,9 +92,24 @@ function MovementController._setupCharacter(self: MovementController, character:
 		end)
 	)
 
+	local lastShouldFaceCamera: boolean? = nil
+
 	table.insert(
 		self._connections,
-		RunService.RenderStepped:Connect(function()
+		RunService.Heartbeat:Connect(function()
+			local isShiftLocked = UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+			local isMoving = humanoid.MoveDirection.Magnitude > 0
+			local shouldFaceCamera = isShiftLocked or isMoving
+
+			if shouldFaceCamera ~= lastShouldFaceCamera then
+				humanoid.AutoRotate = not shouldFaceCamera
+				lastShouldFaceCamera = shouldFaceCamera
+			end
+
+			if not shouldFaceCamera then
+				return
+			end
+
 			local camera = Workspace.CurrentCamera
 			if not camera then
 				return

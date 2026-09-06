@@ -10,8 +10,15 @@ local MovementState = table.freeze({
 	Falling = "Falling" :: MovementState,
 	LightLanding = "LightLanding" :: MovementState,
 	HeavyLanding = "HeavyLanding" :: MovementState,
-	Dashing = "Dashing" :: MovementState,
+	DashingForward = "DashingForward" :: MovementState,
+	DashingSide = "DashingSide" :: MovementState,
+	AirDashing = "AirDashing" :: MovementState,
+	DoubleJumping = "DoubleJumping" :: MovementState,
+	LedgeJumping = "LedgeJumping" :: MovementState,
+	DodgeCancelling = "DodgeCancelling" :: MovementState,
 	Sliding = "Sliding" :: MovementState,
+	Crouching = "Crouching" :: MovementState,
+	CrouchWalking = "CrouchWalking" :: MovementState,
 })
 
 return MovementState

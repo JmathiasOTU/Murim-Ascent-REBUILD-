@@ -5,36 +5,20 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
-local AnimationConstants = require(Shared.Constants.AnimationConstants)
 local MovementConstants = require(Shared.Constants.MovementConstants)
+local AnimationConstants = require(Shared.Constants.AnimationConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local getHumanoidAndRoot = require(Shared.Utils.GetHumanoidAndRoot)
 local classifyDirection8 = require(Shared.Utils.ClassifyDirection8)
+local classifyDashDirection = require(Shared.Utils.ClassifyDashDirection)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local MovementAnimations = require(script.Parent.Parent.Animation.MovementAnimations)
+local QinggongAnimations = require(script.Parent.Parent.Animation.QinggongAnimations)
 local DirectionalWalkAnimations = require(script.Parent.Parent.Animation.DirectionalWalkAnimations)
 local DashAnimations = require(script.Parent.Parent.Animation.DashAnimations)
 local DodgeCancelAnimations = require(script.Parent.Parent.Animation.DodgeCancelAnimations)
-local DashSignals = require(script.Parent.Parent.State.DashSignals)
 
 local player = Players.LocalPlayer
-
--- Dominant-axis 4-way split (not the 8-sector ClassifyDirection8 used for walking) -- matches how
--- the old dash picked between its four directional clips. Defaults to "Back" with no input, which
--- lines up with DashController's own no-input fallback of dashing backward (-LookVector).
-local function classifyDashDirection(moveDirection: Vector3, lookVector: Vector3, rightVector: Vector3): string
-	if moveDirection.Magnitude <= MovementConstants.DashSteerDeadzone then
-		return "Back"
-	end
-
-	local forwardDot = moveDirection:Dot(lookVector)
-	local rightDot = moveDirection:Dot(rightVector)
-
-	if math.abs(forwardDot) > math.abs(rightDot) then
-		return if forwardDot > 0 then "Front" else "Back"
-	end
-	return if rightDot > 0 then "Right" else "Left"
-end
 
 local AnimationController = {}
 AnimationController.__index = AnimationController
@@ -85,6 +69,12 @@ function AnimationController._setupCharacter(self: AnimationController, characte
 	local tracks: { [string]: AnimationTrack } = {}
 	for state, animation in pairs(MovementAnimations) do
 		tracks[state] = animator:LoadAnimation(animation)
+	end
+	for state, animation in pairs(QinggongAnimations) do
+		local track = animator:LoadAnimation(animation)
+		track.Looped = false
+		track.Priority = Enum.AnimationPriority.Action
+		tracks[state] = track
 	end
 	self._tracks = tracks
 
@@ -192,9 +182,7 @@ function AnimationController._exitDashing(self: AnimationController)
 	end
 end
 
--- Left/Right picked directly when strafing; a forward/backward (or no-input) cancel has no
--- matching clip of its own, so it picks a side at random -- matches the old dash's fallback.
-function AnimationController._playDodgeCancel(self: AnimationController)
+function AnimationController._enterDodgeCancelling(self: AnimationController)
 	local humanoid, rootPart = getHumanoidAndRoot(player.Character)
 	if not humanoid or not rootPart then
 		return
@@ -211,25 +199,36 @@ function AnimationController._playDodgeCancel(self: AnimationController)
 		return
 	end
 
-	if self._activeDodgeCancelTrack then
-		self._activeDodgeCancelTrack:Stop(0)
-	end
-
 	track:Play(AnimationConstants.DashFadeInTime)
 	self._activeDodgeCancelTrack = track
+end
 
-	track.Stopped:Once(function()
-		if self._activeDodgeCancelTrack == track then
-			self._activeDodgeCancelTrack = nil
-		end
-	end)
+function AnimationController._exitDodgeCancelling(self: AnimationController)
+	if self._activeDodgeCancelTrack then
+		self._activeDodgeCancelTrack:Stop(AnimationConstants.DashFadeOutTime)
+		self._activeDodgeCancelTrack = nil
+	end
 end
 
 function AnimationController._onMovementStateChanged(self: AnimationController, newState: string, oldState: string)
 	if oldState == MovementState.Walking then
 		self:_exitWalking()
-	elseif oldState == MovementState.Dashing then
+	elseif MovementConstants.DashingStates[oldState] then
 		self:_exitDashing()
+	elseif oldState == MovementState.DodgeCancelling then
+		self:_exitDodgeCancelling()
+	elseif MovementConstants.QinggongAnimationStates[oldState] then
+		-- LedgeJumping isn't a QinggongActionState -- it hands off to Falling the instant the jump
+		-- arc naturally does, same as an ordinary jump, and that's correct. But the one-shot launch
+		-- clip shouldn't get cut off a fraction of a second in just because the FSM label changed
+		-- underneath it -- let it keep playing (it'll stop itself, Looped = false) and rely on its
+		-- higher Action priority to still read correctly over whatever Falling plays underneath.
+		if not (oldState == MovementState.LedgeJumping and newState == MovementState.Falling) then
+			local oldTrack = self._tracks[oldState]
+			if oldTrack then
+				oldTrack:Stop(AnimationConstants.DashFadeOutTime)
+			end
+		end
 	else
 		local oldTrack = self._tracks[oldState]
 		if oldTrack then
@@ -239,8 +238,15 @@ function AnimationController._onMovementStateChanged(self: AnimationController, 
 
 	if newState == MovementState.Walking then
 		self:_enterWalking()
-	elseif newState == MovementState.Dashing then
+	elseif MovementConstants.DashingStates[newState] then
 		self:_enterDashing()
+	elseif newState == MovementState.DodgeCancelling then
+		self:_enterDodgeCancelling()
+	elseif MovementConstants.QinggongAnimationStates[newState] then
+		local newTrack = self._tracks[newState]
+		if newTrack then
+			newTrack:Play(AnimationConstants.DashFadeInTime)
+		end
 	else
 		local newTrack = self._tracks[newState]
 		if newTrack then
@@ -256,10 +262,6 @@ function AnimationController.Init(self: AnimationController)
 
 	movementFSM.Changed:Connect(function(newState: string, oldState: string)
 		self:_onMovementStateChanged(newState, oldState)
-	end)
-
-	DashSignals.Cancelled:Connect(function()
-		self:_playDodgeCancel()
 	end)
 end
 

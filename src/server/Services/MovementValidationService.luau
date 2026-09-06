@@ -6,14 +6,20 @@ local RunService = game:GetService("RunService")
 
 local Shared = ReplicatedStorage.Shared
 local MovementConstants = require(Shared.Constants.MovementConstants)
+local DashCategory = require(Shared.Enums.DashCategory)
+local newDashCooldownStates = require(Shared.Utils.NewDashCooldownStates)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local regenCharges = require(Shared.Utils.RegenCharges)
 local MovementValidationConstants = require(script.Parent.Parent.Constants.MovementValidationConstants)
 
 local requestSprint = ReplicatedStorage.Remotes.RequestSprint :: RemoteEvent
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent
+local requestAirDash = ReplicatedStorage.Remotes.RequestAirDash :: RemoteEvent
+local requestDoubleJump = ReplicatedStorage.Remotes.RequestDoubleJump :: RemoteEvent
+local requestLedgeJump = ReplicatedStorage.Remotes.RequestLedgeJump :: RemoteEvent
 local requestRollCancel = ReplicatedStorage.Remotes.RequestRollCancel :: RemoteEvent
 local requestSlide = ReplicatedStorage.Remotes.RequestSlide :: RemoteEvent
+local requestCrouch = ReplicatedStorage.Remotes.RequestCrouch :: RemoteEvent
 
 type PlayerMovementRecord = {
 	humanoid: Humanoid,
@@ -26,22 +32,43 @@ type PlayerMovementRecord = {
 	-- WalkSpeed itself is bumped to cover it for exactly as long as the client reports sliding,
 	-- the same boolean-driven pattern RequestSprint already uses.
 	isSliding: boolean,
-	lastDashTime: number,
-	-- While now < this, _validatePlayer skips its speed check entirely -- the dash's velocity
-	-- burst is real physics driven by the client's own LinearVelocity constraint, not something
-	-- WalkSpeed-based validation can distinguish from a speed hack.
-	dashSpeedExemptUntil: number,
+	lastCrouchRequestTime: number,
+	isCrouching: boolean,
+	dashCooldowns: { [string]: newDashCooldownStates.DashCooldownState },
+	lastDashCategory: string,
+	lastAirDashTime: number,
+	-- While now < this, _validatePlayer skips its speed check entirely -- covers a dash's own
+	-- velocity burst, and any other transient (e.g. residual walking momentum not yet decayed to a
+	-- just-lowered WalkSpeed) too fast for WalkSpeed-based validation to tell from a speed hack.
+	speedCheckExemptUntil: number,
+	-- Set by _onRequestAirDash/_onRequestLedgeJump, consumed by _validatePlayer the moment its own
+	-- airborne poll observes the resulting landing -- a residual-momentum settle grace can't be
+	-- granted up front like the ground dash's, since when that landing actually happens isn't known
+	-- at request time.
+	wasAirborne: boolean,
+	pendingLandingSettleGrace: boolean,
+	-- No cooldown timer like the dashes -- gated purely by "already used this airborne excursion,"
+	-- reset alongside pendingLandingSettleGrace the moment _validatePlayer's airborne poll detects
+	-- landing. Never touches horizontal velocity, so unlike air dash it needs no speed-check grant.
+	hasDoubleJumped: boolean,
 	rollCancelCharges: number,
 	rollCancelChargeRegenStart: number,
-	-- -math.huge means "eligible" -- see _onRequestRollCancel.
-	lastDashCooldownResetAt: number,
 	lastPosition: Vector3,
 	lastCheckTime: number,
+	speedViolationStreak: number,
 }
+
+local function isAirborne(humanoid: Humanoid): boolean
+	local state = humanoid:GetState()
+	return state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+end
 
 local function computeWalkSpeed(record: PlayerMovementRecord): number
 	if record.isSliding then
 		return MovementConstants.SlideMaxSpeed
+	end
+	if record.isCrouching then
+		return MovementConstants.CrouchSpeed
 	end
 	return if record.isSprinting then MovementConstants.RunSpeed else MovementConstants.WalkSpeed
 end
@@ -76,29 +103,122 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		isSprinting = false,
 		lastSlideRequestTime = 0,
 		isSliding = false,
-		lastDashTime = -math.huge,
-		dashSpeedExemptUntil = 0,
+		lastCrouchRequestTime = 0,
+		isCrouching = false,
+		dashCooldowns = newDashCooldownStates(),
+		lastDashCategory = DashCategory.Forward,
+		lastAirDashTime = -math.huge,
+		speedCheckExemptUntil = 0,
+		wasAirborne = false,
+		pendingLandingSettleGrace = false,
+		hasDoubleJumped = false,
 		rollCancelCharges = MovementConstants.RollCancelMaxCharges,
 		rollCancelChargeRegenStart = os.clock(),
-		lastDashCooldownResetAt = -math.huge,
 		lastPosition = rootPart.Position,
 		lastCheckTime = os.clock(),
+		speedViolationStreak = 0,
 	}
 end
 
-function MovementValidationService._onRequestDash(self: MovementValidationService, player: Player)
+function MovementValidationService._onRequestDash(self: MovementValidationService, player: Player, category: unknown)
+	if typeof(category) ~= "string" or not MovementConstants.DashCooldowns[category] then
+		return
+	end
+
 	local record = self._records[player]
 	if not record or not player.Character then
 		return
 	end
 
 	local now = os.clock()
-	if now - record.lastDashTime < MovementConstants.DashCooldown then
+	local cooldown = record.dashCooldowns[category]
+
+	if now - cooldown.lastDashTime < MovementConstants.DashCooldowns[category] then
 		return
 	end
 
-	record.lastDashTime = now
-	record.dashSpeedExemptUntil = now + MovementConstants.DashDuration
+	cooldown.lastDashTime = now
+	record.lastDashCategory = category
+	record.speedCheckExemptUntil = now + MovementConstants.DashDuration
+end
+
+-- Airborne movement is already fully exempt from the speed check (see isAirborne in
+-- _validatePlayer), so this is only cooldown + legality (must actually be airborne) enforcement --
+-- the speedCheckExemptUntil grant below just covers the brief settle time right after landing,
+-- same reasoning as the ground dash's own grant.
+function MovementValidationService._onRequestAirDash(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	local now = os.clock()
+	if now - record.lastAirDashTime < MovementConstants.AirDashCooldown then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted an air dash while grounded.", player.Name))
+		return
+	end
+
+	record.lastAirDashTime = now
+	record.speedCheckExemptUntil = now + MovementConstants.AirDashDuration
+	record.pendingLandingSettleGrace = true
+end
+
+-- Only overwrites vertical velocity (see DoubleJumpController), so there's nothing here for the
+-- horizontal speed check to be tricked by -- airborne exemption already covers the whole arc, and
+-- legality is just "actually airborne" + "hasn't already used this excursion's charge."
+function MovementValidationService._onRequestDoubleJump(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a double jump while grounded.", player.Name))
+		return
+	end
+
+	if record.hasDoubleJumped then
+		warn(string.format("[Anti-Exploit] %s attempted multiple double jumps in one airborne cycle.", player.Name))
+		return
+	end
+
+	record.hasDoubleJumped = true
+end
+
+-- Unlike the other Qinggong actions, legality here isn't cooldown/charge-gated at all -- it's
+-- purely spatial ("was there actually a ledge to jump off"), independently re-checked with the
+-- server's own raycast rather than trusting the client's claim. Forward direction comes off actual
+-- velocity (not CFrame.LookVector) since a slide can carry the character in a direction it isn't
+-- necessarily facing; the extra forward range accounts for how far the client's own position
+-- estimate can have drifted from the server's by the time this arrives.
+function MovementValidationService._onRequestLedgeJump(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	local rootPart = record.rootPart
+	local velocity = rootPart.AssemblyLinearVelocity
+	local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	local forwardDirection = if flatVelocity.Magnitude > 0.001 then flatVelocity.Unit else rootPart.CFrame.LookVector
+	local origin = rootPart.Position + (forwardDirection * MovementConstants.LedgeJumpServerEdgeCheckForward)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { character }
+
+	local downRay = workspace:Raycast(origin, Vector3.new(0, -MovementConstants.LedgeJumpEdgeCheckDown, 0), rayParams)
+	if downRay then
+		warn(string.format("[Anti-Exploit] %s claimed a ledge jump with ground still ahead.", player.Name))
+		return
+	end
+
+	record.pendingLandingSettleGrace = true
 end
 
 -- Dedicated action, not inferred from timing -- leaving Dashing early also happens for reasons
@@ -112,7 +232,7 @@ function MovementValidationService._onRequestRollCancel(self: MovementValidation
 	end
 
 	local now = os.clock()
-	if now >= record.dashSpeedExemptUntil then
+	if now >= record.speedCheckExemptUntil then
 		return
 	end
 
@@ -135,15 +255,15 @@ function MovementValidationService._onRequestRollCancel(self: MovementValidation
 	-- driving velocity off WalkSpeed/MoveDirection every physics step, so the two transiently
 	-- combine before settling. This buys that settling time before strict speed validation
 	-- resumes, instead of rubberbanding the player mid-transient.
-	record.dashSpeedExemptUntil = now + MovementValidationConstants.DashCancelExemptionGrace
+	record.speedCheckExemptUntil = now + MovementValidationConstants.DashCancelExemptionGrace
 	record.lastPosition = record.rootPart.Position
 	record.lastCheckTime = now
 
-	-- Only once per DashCooldown window, so chaining cancel -> instant re-dash -> cancel again
-	-- doesn't grant a second reset.
-	if now - record.lastDashCooldownResetAt >= MovementConstants.DashCooldown then
-		record.lastDashTime = -math.huge
-		record.lastDashCooldownResetAt = now
+	-- once per window; blocks cancel->redash->cancel abuse
+	local cooldown = record.dashCooldowns[record.lastDashCategory]
+	if now - cooldown.lastDashCooldownResetAt >= MovementConstants.DashCooldowns[record.lastDashCategory] then
+		cooldown.lastDashTime = -math.huge
+		cooldown.lastDashCooldownResetAt = now
 	end
 end
 
@@ -196,16 +316,54 @@ function MovementValidationService._onRequestSlide(self: MovementValidationServi
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
 end
 
+function MovementValidationService._onRequestCrouch(self: MovementValidationService, player: Player, isCrouching: unknown)
+	if typeof(isCrouching) ~= "boolean" then
+		return
+	end
+
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	if not isCrouching then
+		record.isCrouching = false
+		record.humanoid.WalkSpeed = computeWalkSpeed(record)
+		return
+	end
+
+	local now = os.clock()
+	if now - record.lastCrouchRequestTime < MovementValidationConstants.CrouchRequestCooldown then
+		return
+	end
+	record.lastCrouchRequestTime = now
+
+	record.isCrouching = true
+	record.humanoid.WalkSpeed = computeWalkSpeed(record)
+	record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, now + MovementValidationConstants.CrouchSpeedSettleGrace)
+end
+
 function MovementValidationService._validatePlayer(_self: MovementValidationService, player: Player, record: PlayerMovementRecord, now: number)
 	if not player.Character then
 		return
 	end
 
 	local humanoid, rootPart = record.humanoid, record.rootPart
+	local airborneNow = isAirborne(humanoid)
 
-	if now < record.dashSpeedExemptUntil then
+	if record.wasAirborne and not airborneNow then
+		if record.pendingLandingSettleGrace then
+			record.pendingLandingSettleGrace = false
+			record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, now + MovementValidationConstants.AerialActionLandingSettleGrace)
+		end
+		record.hasDoubleJumped = false
+	end
+	record.wasAirborne = airborneNow
+
+	if now < record.speedCheckExemptUntil or airborneNow then
 		record.lastPosition = rootPart.Position
 		record.lastCheckTime = now
+		record.speedViolationStreak = 0
 		return
 	end
 
@@ -220,15 +378,22 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 		local maxAllowedDistance = humanoid.WalkSpeed * MovementConstants.SpeedTolerance * elapsed
 
 		if horizontalDelta.Magnitude > maxAllowedDistance then
-			warn(string.format(
-				"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at WalkSpeed %d) -- snapped back",
-				player.Name,
-				horizontalDelta.Magnitude,
-				elapsed,
-				maxAllowedDistance,
-				humanoid.WalkSpeed
-			))
-			rootPart.CFrame = CFrame.new(record.lastPosition) * rootPart.CFrame.Rotation
+			record.speedViolationStreak += 1
+
+			if record.speedViolationStreak >= MovementValidationConstants.SpeedViolationStreakThreshold then
+				warn(string.format(
+					"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at WalkSpeed %d) -- snapped back",
+					player.Name,
+					horizontalDelta.Magnitude,
+					elapsed,
+					maxAllowedDistance,
+					humanoid.WalkSpeed
+				))
+				rootPart.CFrame = CFrame.new(record.lastPosition) * rootPart.CFrame.Rotation
+				record.speedViolationStreak = 0
+			end
+		else
+			record.speedViolationStreak = 0
 		end
 	end
 
@@ -264,8 +429,20 @@ function MovementValidationService.Init(self: MovementValidationService)
 		self:_onRequestSprint(player, wantsToSprint)
 	end)
 
-	requestDash.OnServerEvent:Connect(function(player: Player)
-		self:_onRequestDash(player)
+	requestDash.OnServerEvent:Connect(function(player: Player, category: unknown)
+		self:_onRequestDash(player, category)
+	end)
+
+	requestAirDash.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestAirDash(player)
+	end)
+
+	requestDoubleJump.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestDoubleJump(player)
+	end)
+
+	requestLedgeJump.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestLedgeJump(player)
 	end)
 
 	requestRollCancel.OnServerEvent:Connect(function(player: Player)
@@ -274,6 +451,10 @@ function MovementValidationService.Init(self: MovementValidationService)
 
 	requestSlide.OnServerEvent:Connect(function(player: Player, isSliding: unknown)
 		self:_onRequestSlide(player, isSliding)
+	end)
+
+	requestCrouch.OnServerEvent:Connect(function(player: Player, isCrouching: unknown)
+		self:_onRequestCrouch(player, isCrouching)
 	end)
 
 	local nextValidationTime = 0
