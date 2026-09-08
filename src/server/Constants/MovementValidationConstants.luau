@@ -85,6 +85,35 @@ local MovementValidationConstants = table.freeze({
 	-- real jump is never missed, while comfortably above ordinary grounded jitter (stair-stepping,
 	-- floor-snap corrections) so standing still doesn't false-flag as airborne.
 	AirborneVerticalVelocityThreshold = 10,
+
+	-- Minimum elapsed time isAirborne (above) requires before trusting its own position-delta vertical
+	-- velocity estimate. That estimate reuses record.lastPosition/lastCheckTime -- refreshed every
+	-- ValidationTickRate tick by _validatePlayer regardless of when isAirborne is actually called (one
+	-- of the 8 ability-request handlers, at an arbitrary time, or _validatePlayer itself), so normally
+	-- never more than about one tick stale. The one case that doesn't cover: a call landing so soon
+	-- after that refresh that the elapsed denominator is near zero, which would amplify ordinary
+	-- position jitter into a spurious velocity reading. Comfortably below a real validation tick
+	-- (~0.067s) so it never narrows the check under normal operation, just guards the near-zero edge.
+	MinVerticalCheckElapsed = 0.01,
+
+	-- Dedicated speed-check exemption window for a wall leap's own outward burst (see
+	-- _onRequestWallLeap), same pattern ground dash and roll cancel already use -- WallRunning ->
+	-- WallLeaping is an airborne-to-airborne transition (both keep the Humanoid in Freefall), so it
+	-- never passes through the wasAirborne-and-not-airborneNow landing transition that grants
+	-- AerialActionLandingSettleGrace elsewhere in this file. Without its own grant, a leap fired while
+	-- an unrelated, lower-ceiling exemption happens to still be open (e.g. the Qinggong Sprinting
+	-- technique's own FullSprintSettleGrace, renewed every ~0.5s and active ~40% of the time while
+	-- sprinting) gets validated against THAT far lower ceiling instead of the airborne one -- this is
+	-- the confirmed cause of the intermittent, latency-independent wall-run-into-leap rubberband.
+	-- Covers WallLeapReleaseDelay (0.15s) plus a little past it for the settle back into free physics.
+	WallLeapSpeedExemptionGrace = 0.25,
+
+	-- Same reasoning and same structural gap as WallLeapSpeedExemptionGrace above, for
+	-- WallClimbLeap -- WallHanging -> WallClimbLeaping is the identical airborne-to-airborne shape
+	-- (WallClingController._tryWallClimbLeap also forces Freefall via ChangeState). Named separately
+	-- from the wall-leap grace rather than reusing it, even though currently the same value, so the
+	-- two can be tuned independently later (WallClimbLeapReleaseDelay already has its own constant too).
+	WallClimbLeapSpeedExemptionGrace = 0.25,
 })
 
 return MovementValidationConstants
