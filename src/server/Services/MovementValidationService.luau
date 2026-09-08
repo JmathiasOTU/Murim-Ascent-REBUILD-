@@ -767,8 +767,16 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 
 		local slopeAngle = getSlopeAngle(character, rayParams)
 		local isSteep = slopeAngle ~= nil and slopeAngle >= MovementConstants.SlideSteepSlopeAngle
+		-- Slope ANGLE alone doesn't say which way the player is actually traveling -- a modified
+		-- client can hold a slide facing straight up a >=20deg incline, which reads as "steep" just
+		-- the same, permanently resetting slideFlatSince and bypassing the timeout entirely while
+		-- riding SlideMaxSpeed uphill with no time limit. Require real downward vertical velocity too
+		-- (a cheap proxy, not full slope-projected velocity math -- see
+		-- SlideDownhillVelocityThreshold's own comment) before treating the slope as one actually
+		-- being slid down.
+		local isMovingDownhill = rootPart.AssemblyLinearVelocity.Y < MovementValidationConstants.SlideDownhillVelocityThreshold
 
-		if isSteep then
+		if isSteep and isMovingDownhill then
 			record.slideFlatSince = nil
 		else
 			record.slideFlatSince = record.slideFlatSince or now
@@ -811,21 +819,56 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 			currentPosition.Z - record.lastPosition.Z
 		)
 		local baseSpeed = if airborneNow then MovementConstants.MaxAirborneHorizontalSpeed else humanoid.WalkSpeed
-		local maxAllowedDistance = baseSpeed * MovementConstants.SpeedTolerance * elapsed
+		-- Grounded SpeedTolerance (2.5x) absorbs Humanoid's own animation/ground-controller jitter --
+		-- airborne motion is a clean physics trajectory with no animation fighting it, so it gets the
+		-- tighter AirborneSpeedTolerance instead (see that constant's own comment for the math this
+		-- was sized against). Reusing SpeedTolerance here would've allowed 375 studs/s, far looser
+		-- than MaxAirborneHorizontalSpeed was meant to enforce.
+		local tolerance = if airborneNow then MovementConstants.AirborneSpeedTolerance else MovementConstants.SpeedTolerance
+		local maxAllowedDistance = baseSpeed * tolerance * elapsed
 
-		if horizontalDelta.Magnitude > maxAllowedDistance then
+		local horizontalViolated = horizontalDelta.Magnitude > maxAllowedDistance
+
+		-- Vertical ascent governance: nothing else in this file checks vertical velocity/position at
+		-- all, and wall running in particular holds a player airborne indefinitely with no server
+		-- enforcement of WallRunGravity, so a modified client could otherwise push
+		-- AssemblyLinearVelocity.Y upward and climb into the skybox completely unchecked. Sampled as a
+		-- position delta over the same elapsed window as the horizontal check (not a raw instantaneous
+		-- velocity read) so a single-frame physics spike -- a landing impulse, a collision bounce --
+		-- can't false-positive it. Only ascending delta is ever flagged: falling is normal physics with
+		-- no exploit value, and Roblox gravity has no default terminal velocity, so capping descent
+		-- would false-positive long legitimate falls.
+		local verticalDelta = currentPosition.Y - record.lastPosition.Y
+		local maxAllowedVerticalRise = MovementConstants.MaxVerticalAscendSpeed * MovementConstants.AirborneSpeedTolerance * elapsed
+		local verticalViolated = verticalDelta > maxAllowedVerticalRise
+
+		-- Shared streak/rubberband flow for both axes (not a second independent counter) -- either
+		-- axis contributes to the same escalation, and a single rubberband (resetting the full CFrame,
+		-- not just the horizontal component) naturally corrects both at once.
+		if horizontalViolated or verticalViolated then
 			record.speedViolationStreak += 1
 
 			if record.speedViolationStreak >= MovementValidationConstants.SpeedViolationStreakThreshold then
-				warn(string.format(
-					"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at %s speed %.1f) -- snapped back",
-					player.Name,
-					horizontalDelta.Magnitude,
-					elapsed,
-					maxAllowedDistance,
-					if airborneNow then "airborne" else "WalkSpeed",
-					baseSpeed
-				))
+				if horizontalViolated then
+					warn(string.format(
+						"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at %s speed %.1f) -- snapped back",
+						player.Name,
+						horizontalDelta.Magnitude,
+						elapsed,
+						maxAllowedDistance,
+						if airborneNow then "airborne" else "WalkSpeed",
+						baseSpeed
+					))
+				end
+				if verticalViolated then
+					warn(string.format(
+						"[Anti-Exploit] %s ascended %.1f studs in %.3fs (max %.1f) -- snapped back",
+						player.Name,
+						verticalDelta,
+						elapsed,
+						maxAllowedVerticalRise
+					))
+				end
 				rootPart.CFrame = CFrame.new(record.lastPosition) * rootPart.CFrame.Rotation
 				record.speedViolationStreak = 0
 			end

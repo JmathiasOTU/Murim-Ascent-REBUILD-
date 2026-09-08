@@ -45,10 +45,10 @@ local MovementConstants = table.freeze({
 	SpeedTolerance = 2.5,
 
 	-- Ceiling the airborne branch of MovementValidationService._validatePlayer checks horizontal
-	-- speed against (with SpeedTolerance still applied on top), instead of the old behavior of
-	-- skipping the speed check entirely for the whole time a player is airborne. Derived from the
-	-- fastest legitimate airborne horizontal velocity the game can currently produce: DashPower (150)
-	-- carried into a jump by a roll-cancelled ground dash (see
+	-- speed against (with AirborneSpeedTolerance below applied on top, NOT the grounded SpeedTolerance
+	-- above), instead of the old behavior of skipping the speed check entirely for the whole time a
+	-- player is airborne. Derived from the fastest legitimate airborne horizontal velocity the game
+	-- can currently produce: DashPower (150) carried into a jump by a roll-cancelled ground dash (see
 	-- MovementValidationConstants.DashCancelExemptionGrace) -- faster than any Qinggong ability's own
 	-- airborne speed (AirDashSpeed 112.5, WallLeapOutwardPower 105, WallClimbLeapOutwardPower 100,
 	-- WallRunSpeed 60). Deliberately its own named constant rather than reusing DashPower/AirDashSpeed,
@@ -56,6 +56,39 @@ local MovementConstants = table.freeze({
 	-- combat knockback/stagger exists (design doc Section 4) -- a legitimate parry knockback could
 	-- plausibly exceed this.
 	MaxAirborneHorizontalSpeed = 150,
+
+	-- Grounded SpeedTolerance (2.5x) exists to absorb Humanoid's own animation/ground-controller
+	-- jitter -- irrelevant while airborne, where motion is a clean physics trajectory with nothing
+	-- animation-driven fighting it. Applying the full 2.5x to MaxAirborneHorizontalSpeed would allow
+	-- 375 studs/s, far looser than that ceiling was meant to enforce. Sized instead off the actual
+	-- validation cadence: at ValidationTickRate (1/15s), a legitimate jump-cancelled dash carrying
+	-- DashPower (150) only covers ~10 studs of raw distance in one tick (150 * 1/15) before any
+	-- tolerance is applied. 1.5x turns that into a ~15-stud allowance per tick -- a 50% buffer over the
+	-- legitimate raw value, enough to absorb one replication/physics hiccup without false-positiving a
+	-- real player, but nowhere near as loose as 2.5x's 150% buffer. Also reused for the vertical
+	-- ascent check below (MaxVerticalAscendSpeed) -- same "clean physics burst, not animation" logic.
+	AirborneSpeedTolerance = 1.5,
+
+	-- Ceiling MovementValidationService._validatePlayer checks vertical ASCENT against (see
+	-- MaxAirborneHorizontalSpeed's comment for why this exists at all: wall running holds a player
+	-- airborne indefinitely with no server enforcement of WallRunGravity otherwise). Only ascending
+	-- delta is ever flagged -- falling has no exploit value, and Roblox gravity has no default
+	-- terminal velocity, so capping descent would false-positive long legitimate falls.
+	--
+	-- Derived from the single highest legitimate one-shot vertical velocity any ability can produce
+	-- (all of these overwrite Y outright rather than stacking additively, so only the single largest
+	-- one matters, not a sum): DoubleJumpVelocity 100, WallLeapUpwardPower 60 * SprintWallLeapMultiplier
+	-- 1.1 = 66, WallClimbLeapUpwardPower 50 * SprintWallJumpMultiplier 1.2 = 60, WallBoostPower 90 *
+	-- SprintWallJumpMultiplier 1.2 = 108, WallClingDoubleJumpVelocity 60, LedgeJumpUpPower 71.25 *
+	-- SprintLedgeJumpMultiplier 1.25 = 89.0625, WallRunEntryBoostPower 18 (peak, decays). Air dash's
+	-- vertical component (AirDashController._applyImpulse) is camera-pitch-scaled: AirDashSpeed 112.5 *
+	-- AirDashVerticalMult 1.2 * cameraPitch, where cameraPitch is camera.CFrame.LookVector.Y -- this
+	-- project defines no custom pitch clamp (see CameraConstants.luau, which has none), so the only
+	-- real bound is the mathematical one on a unit vector's Y component (<=1, aiming straight up),
+	-- giving a worst case of 112.5 * 1.2 * 1 = 135 -- the highest of all of the above. AirborneSpeedTolerance
+	-- (not a separately-tuned value) is applied on top at the call site for the same tick-rate/gravity-
+	-- interaction margin reasoning as the horizontal airborne check.
+	MaxVerticalAscendSpeed = 135,
 
 	LightLandingSpeedThreshold = 25,
 	

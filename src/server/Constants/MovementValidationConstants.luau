@@ -47,6 +47,16 @@ local MovementValidationConstants = table.freeze({
 	-- legitimate slide always ends client-side at SlideFrictionDuration regardless of this.
 	SlideFlatGroundNetworkGrace = 0.3,
 
+	-- Threshold below which vertical velocity counts as "actually descending" for the flat-ground
+	-- slide timeout's steep-slope check (see getSlopeAngle's caller in _validatePlayer) -- slope ANGLE
+	-- alone can't tell downhill from uphill, so a modified client holding a slide facing up a >=20deg
+	-- incline would otherwise read as "steep" forever and never trip the timeout. -5 studs/s is a
+	-- cheap, safe proxy rather than full slope-projected velocity math: a legitimate slide entering
+	-- even the shallowest qualifying incline (SlideSteepSlopeAngle, 20deg) produces Y velocity well
+	-- past -5 while genuinely descending, so this only excludes someone stationary-ish or moving
+	-- upward on the slope, exactly the case that needs to fall through to the timeout.
+	SlideDownhillVelocityThreshold = -5,
+
 	-- Radius for the wall-run/wall-leap proximity sanity check (isNearWall below) -- generous on
 	-- purpose (this is a coarse backstop against claiming either with no wall at all, not precision
 	-- anti-cheat) since the server's own snapshot of the character can already be a few studs behind
