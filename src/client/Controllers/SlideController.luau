@@ -97,14 +97,25 @@ function SlideController._beginSlide(self: SlideController, rootPart: BasePart)
 	requestSlide:FireServer(true)
 
 	local currentMomentum = rootPart.AssemblyLinearVelocity * Vector3.new(1, 0, 1)
-	local speed = if currentMomentum.Magnitude > 0
+	local rawSpeed = if currentMomentum.Magnitude > 0
 		then currentMomentum.Magnitude * MovementConstants.SlideBoostMultiplier
 		else MovementConstants.WalkSpeed * MovementConstants.SlideBoostMultiplier
 
+	-- Landing into a slide at high momentum (off a WallLeap or AirDash, say) could otherwise produce
+	-- an entry speed well above SlideMaxSpeed -- and since the flat-ground decay path below only ever
+	-- bleeds speed down TOWARD SlideFrictionFloorSpeed, never clamps against SlideMaxSpeed itself, an
+	-- uncapped entry would keep the player well above SlideMaxSpeed for the whole SlideFrictionDuration
+	-- decay, not just one tick. Clamped BEFORE the sprint multiplier below so sprinting still has
+	-- something to boost past.
+	local speed = math.min(rawSpeed, MovementConstants.SlideMaxSpeed)
+
 	-- Qinggong Sprinting empowers this slide -- checked once here at entry, same "locked in at the
-	-- moment of activation" shape as every other sprint-boosted ability.
+	-- moment of activation" shape as every other sprint-boosted ability. Allowed to exceed
+	-- SlideMaxSpeed up to SprintSlideMaxSpeedMultiplier's ceiling (matched server-side by
+	-- MovementValidationService.computeWalkSpeed) rather than reclamped back down to the same cap,
+	-- or the sprint bonus would be pointless.
 	if SprintController:IsSprintActive() then
-		speed *= MovementConstants.SprintSlideSpeedMultiplier
+		speed = math.min(speed * MovementConstants.SprintSlideSpeedMultiplier, MovementConstants.SlideMaxSpeed * MovementConstants.SprintSlideMaxSpeedMultiplier)
 	end
 
 	-- Primed true so the very first non-steep tick (e.g. starting a slide on flat ground) still
@@ -124,7 +135,18 @@ function SlideController._beginSlide(self: SlideController, rootPart: BasePart)
 	-- it starts.
 	local hasReachedSlideSpeed = false
 
+	-- The server (MovementValidationService) only grants SlideMaxSpeed for as long as this renewal
+	-- keeps arriving, since a slide's duration is physics-driven and unbounded -- see
+	-- MovementValidationConstants.SlideRenewalGraceWindow for the server's expiry side of this.
+	local timeSinceRenewal = 0
+
 	self._steerConnection = RunService.Heartbeat:Connect(function(dt: number)
+		timeSinceRenewal += dt
+		if timeSinceRenewal >= MovementConstants.SlideRenewalInterval then
+			timeSinceRenewal -= MovementConstants.SlideRenewalInterval
+			requestSlide:FireServer(true)
+		end
+
 		local groundNormal, slopeAngle = self:_checkSlideSlope(rootPart)
 		local isSteep = slopeAngle ~= nil and slopeAngle >= MovementConstants.SlideSteepSlopeAngle
 

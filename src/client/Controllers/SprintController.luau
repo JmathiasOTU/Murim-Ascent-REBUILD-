@@ -27,6 +27,9 @@ export type SprintController = typeof(setmetatable(
 		-- 0 = no sprint boost at all, 0..1 = ramping (SprintCharging), 1 = fully sprinting or
 		-- carrying that boost through one of MovementConstants.SprintCarryStates.
 		_sprintIntensity: number,
+		-- Time since the last RequestSprintTechnique(true) renewal -- see the top-level Heartbeat
+		-- connection below. Only counts up while IsSprintActive() is true.
+		_fullSprintRenewalTimer: number,
 	},
 	SprintController
 ))
@@ -45,6 +48,7 @@ function SprintController.new(): SprintController
 		_runHoldStartTime = nil,
 		_chargeStartTime = nil,
 		_sprintIntensity = 0,
+		_fullSprintRenewalTimer = 0,
 	}, SprintController)
 
 	return self
@@ -103,8 +107,25 @@ function SprintController._setupCharacter(self: SprintController, character: Mod
 	self._runHoldStartTime = nil
 	self._chargeStartTime = nil
 	self._sprintIntensity = 0
+	self._fullSprintRenewalTimer = 0
 
-	self._rampConnection = RunService.Heartbeat:Connect(function()
+	self._rampConnection = RunService.Heartbeat:Connect(function(dt: number)
+		-- The server (MovementValidationService) only grants SprintSpeed for as long as this renewal
+		-- keeps arriving, since IsSprintActive() can stay true well past the Sprinting state itself
+		-- (carried through Sliding/WallRunning/etc. via MovementConstants.SprintCarryStates) -- kept
+		-- independent of the state branches below so a carried boost keeps renewing too, not just
+		-- Sprinting proper. See MovementValidationConstants.FullSprintRenewalGraceWindow for the
+		-- server's expiry side of this.
+		if self:IsSprintActive() then
+			self._fullSprintRenewalTimer += dt
+			if self._fullSprintRenewalTimer >= MovementConstants.FullSprintRenewalInterval then
+				self._fullSprintRenewalTimer -= MovementConstants.FullSprintRenewalInterval
+				requestSprintTechnique:FireServer(true)
+			end
+		else
+			self._fullSprintRenewalTimer = 0
+		end
+
 		local state = movementFSM:GetState()
 
 		if state == MovementState.Running then
@@ -162,6 +183,7 @@ function SprintController._setupCharacter(self: SprintController, character: Mod
 			self._runHoldStartTime = nil
 			self._chargeStartTime = nil
 			self._sprintIntensity = 0
+			self._fullSprintRenewalTimer = 0
 		end)
 	)
 end

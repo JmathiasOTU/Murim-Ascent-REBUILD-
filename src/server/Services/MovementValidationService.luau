@@ -36,14 +36,31 @@ type PlayerMovementRecord = {
 	isSprinting: boolean,
 	-- The Qinggong Sprinting technique's fully-ramped boundary (see SprintController) -- the ramp
 	-- itself (SprintCharging) never leaves Running's WalkSpeed tolerance, so only this needs its own
-	-- server-tracked flag.
+	-- server-tracked flag. Like isSliding below, it's kept honest by a renewal timeout rather than
+	-- trusted as a one-shot permanent flag -- see lastFullSprintRequestTime.
 	isFullSprinting: boolean,
+	-- Last accepted RequestSprintTechnique(true), renewed by SprintController on
+	-- MovementConstants.FullSprintRenewalInterval for as long as IsSprintActive() stays true --
+	-- _validatePlayer forces isFullSprinting back off if this goes stale (see
+	-- MovementValidationConstants.FullSprintRenewalGraceWindow), the same pattern as the slide fix
+	-- below (RequestSprintTechnique(true) previously had no expiry at all).
+	lastFullSprintRequestTime: number,
+	-- Also doubles as "last accepted RequestSlide(true)" for the renewal-expiry check in
+	-- _validatePlayer, since SlideController keeps re-firing that same request on
+	-- MovementConstants.SlideRenewalInterval for as long as the slide continues.
 	lastSlideRequestTime: number,
 	-- Sliding can run for a variable, physics-driven duration (decaying friction, re-accelerating
 	-- down a steep slope), unlike Dash's fixed duration -- so instead of a timed exemption window,
-	-- WalkSpeed itself is bumped to cover it for exactly as long as the client reports sliding,
-	-- the same boolean-driven pattern RequestSprint already uses.
+	-- WalkSpeed itself is bumped to cover it for as long as the client keeps affirming the slide is
+	-- still active (see MovementConstants.SlideRenewalInterval / MovementValidationConstants.
+	-- SlideRenewalGraceWindow) -- a single unrenewed claim can't hold SlideMaxSpeed indefinitely.
 	isSliding: boolean,
+	-- nil while isSliding is false or the ground under a sliding player is currently steep; set to
+	-- the moment non-steep ground was first seen otherwise. Lets _validatePlayer mirror the client's
+	-- own SlideController flat-ground decay-to-end timer (SlideFrictionDuration) independently,
+	-- instead of trusting RequestSlide(true) renewals alone -- those only prove the client is still
+	-- claiming a slide, not that there's still a real slope justifying one (see getSlopeAngle).
+	slideFlatSince: number?,
 	lastCrouchRequestTime: number,
 	isCrouching: boolean,
 	dashCooldowns: { [string]: newDashCooldownStates.DashCooldownState },
@@ -103,8 +120,53 @@ local function isNearWall(character: Model, player: Player): boolean
 	return false
 end
 
+-- Coarse geometry sanity check for starting or renewing a slide: is there actually ground beneath
+-- the player at all, mirroring the client's own downward slope raycast (see
+-- SlideController._checkSlideSlope) without trusting its claim -- same "is there real geometry here
+-- at all" bar as isNearWall above, not slope-accurate.
+local function isOverGround(character: Model): boolean
+	local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not rootPart then
+		return false
+	end
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { character }
+
+	return workspace:Raycast(rootPart.Position, Vector3.new(0, -MovementConstants.SlideGroundRayDistance, 0), rayParams) ~= nil
+end
+
+-- Same downward-raycast shape as the client's own SlideController._checkSlideSlope, used by
+-- _validatePlayer to independently track how long a slide has actually been on non-steep ground --
+-- isOverGround above only proves ground exists at all, not that it's still steep enough to justify
+-- holding SlideMaxSpeed via renewal spam (see PRIORITY 3 in _validatePlayer). Coarse, same "is there
+-- real geometry" bar as isNearWall/isOverGround, not pixel-perfect slope matching. rayParams is built
+-- fresh by the caller per player per call (not a shared self._rayParams like the client's own
+-- version) since each call here checks a different player's own character.
+local function getSlopeAngle(character: Model, rayParams: RaycastParams): number?
+	local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not rootPart then
+		return nil
+	end
+
+	local result = workspace:Raycast(rootPart.Position, Vector3.new(0, -MovementConstants.SlideGroundRayDistance, 0), rayParams)
+	if not result then
+		return nil
+	end
+
+	return math.deg(math.acos(math.clamp(result.Normal:Dot(Vector3.new(0, 1, 0)), -1, 1)))
+end
+
 local function computeWalkSpeed(record: PlayerMovementRecord): number
 	if record.isSliding then
+		-- Mirrors SlideController._beginSlide's own clamp: a Qinggong-Sprint-boosted slide is allowed
+		-- an entry speed up to SlideMaxSpeed * SprintSlideMaxSpeedMultiplier, not just SlideMaxSpeed --
+		-- granting only the plain ceiling here would rubberband a legitimate sprint-boosted slide the
+		-- instant it exceeds SlideMaxSpeed, as if it were the exploit this file is guarding against.
+		if record.isFullSprinting then
+			return MovementConstants.SlideMaxSpeed * MovementConstants.SprintSlideMaxSpeedMultiplier
+		end
 		return MovementConstants.SlideMaxSpeed
 	end
 	if record.isCrouching then
@@ -145,8 +207,10 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		lastSprintRequestTime = 0,
 		isSprinting = false,
 		isFullSprinting = false,
+		lastFullSprintRequestTime = 0,
 		lastSlideRequestTime = 0,
 		isSliding = false,
+		slideFlatSince = nil,
 		lastCrouchRequestTime = 0,
 		isCrouching = false,
 		dashCooldowns = newDashCooldownStates(),
@@ -552,10 +616,13 @@ function MovementValidationService._onRequestSprint(self: MovementValidationServ
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
 end
 
--- SprintController fires this only at the fully-ramped boundary (entering/leaving the Sprinting
--- state) -- the ramp itself (SprintCharging) never leaves Running's WalkSpeed*SpeedTolerance
+-- SprintController fires this at the fully-ramped boundary (entering/leaving the Sprinting state),
+-- then keeps re-firing it true on MovementConstants.FullSprintRenewalInterval for as long as
+-- IsSprintActive() stays true (Sprinting itself, or a carried boost through Sliding/WallRunning/
+-- etc.) -- the ramp itself (SprintCharging) never leaves Running's WalkSpeed*SpeedTolerance
 -- allowance, so the server doesn't need to mirror the client's per-frame ramp, just raise its own
--- WalkSpeed ceiling once the technique is actually complete.
+-- WalkSpeed ceiling once the technique is actually complete, and keep it renewed like isSliding
+-- below rather than trusting a single claim forever (_validatePlayer expires it otherwise).
 function MovementValidationService._onRequestSprintTechnique(self: MovementValidationService, player: Player, isFullSprinting: unknown)
 	if typeof(isFullSprinting) ~= "boolean" then
 		return
@@ -572,6 +639,7 @@ function MovementValidationService._onRequestSprintTechnique(self: MovementValid
 	record.isFullSprinting = isFullSprinting
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
 	if isFullSprinting then
+		record.lastFullSprintRequestTime = os.clock()
 		record.speedCheckExemptUntil =
 			math.max(record.speedCheckExemptUntil, os.clock() + MovementValidationConstants.FullSprintSettleGrace)
 	end
@@ -583,7 +651,8 @@ function MovementValidationService._onRequestSlide(self: MovementValidationServi
 	end
 
 	local record = self._records[player]
-	if not record or not player.Character then
+	local character = player.Character
+	if not record or not character then
 		return
 	end
 
@@ -592,6 +661,7 @@ function MovementValidationService._onRequestSlide(self: MovementValidationServi
 	-- "start" which only delays the slide by a fraction of a second.
 	if not isSliding then
 		record.isSliding = false
+		record.slideFlatSince = nil
 		record.humanoid.WalkSpeed = computeWalkSpeed(record)
 		return
 	end
@@ -600,9 +670,20 @@ function MovementValidationService._onRequestSlide(self: MovementValidationServi
 	if now - record.lastSlideRequestTime < MovementValidationConstants.SlideRequestCooldown then
 		return
 	end
-	record.lastSlideRequestTime = now
 
+	-- Independently re-checked (not just trusted) on every start AND every renewal -- a modified
+	-- client claiming isSliding=true with no ground underneath is exactly how the original exploit
+	-- locked in SlideMaxSpeed permanently off a single request.
+	if not isOverGround(character) then
+		warn(string.format("[Anti-Exploit] %s claimed a slide with no ground beneath.", player.Name))
+		return
+	end
+
+	record.lastSlideRequestTime = now
 	record.isSliding = true
+	-- Defensive reset, not strictly required (every path that turns isSliding off already clears
+	-- this) -- keeps a fresh slide from ever inheriting a stale timestamp from a previous one.
+	record.slideFlatSince = nil
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
 end
 
@@ -634,12 +715,71 @@ function MovementValidationService._onRequestCrouch(self: MovementValidationServ
 end
 
 function MovementValidationService._validatePlayer(_self: MovementValidationService, player: Player, record: PlayerMovementRecord, now: number)
-	if not player.Character then
+	local character = player.Character
+	if not character then
 		return
 	end
 
 	local humanoid, rootPart = record.humanoid, record.rootPart
 	local airborneNow = isAirborne(humanoid)
+
+	-- State hygiene, not a speed fix (see the airborne speed check below, which no longer trusts
+	-- WalkSpeed at all while airborne): a dropped RequestSlide(false) packet could otherwise leave
+	-- isSliding=true lying about reality for as long as the player stays airborne -- other systems
+	-- that might read it later (animation sync, a future combat system asking "is this player
+	-- currently sliding") shouldn't see a slide that's no longer physically happening. Checked first,
+	-- before any of the renewal/slope logic below, so the rest of this tick sees corrected state.
+	if airborneNow and record.isSliding then
+		record.isSliding = false
+		record.slideFlatSince = nil
+		humanoid.WalkSpeed = computeWalkSpeed(record)
+	end
+
+	-- Renewal timeout: SlideController re-fires RequestSlide(true) every SlideRenewalInterval for as
+	-- long as the slide continues, so a live slide's lastSlideRequestTime never gets this stale. If it
+	-- does -- the client stopped renewing, or never was legitimately sliding at all -- drop back to
+	-- computeWalkSpeed's normal value instead of leaving SlideMaxSpeed granted off a stale claim.
+	if record.isSliding and now - record.lastSlideRequestTime >= MovementValidationConstants.SlideRenewalGraceWindow then
+		record.isSliding = false
+		record.slideFlatSince = nil
+		humanoid.WalkSpeed = computeWalkSpeed(record)
+	end
+
+	-- Same renewal-timeout idea for the Qinggong Sprinting technique: SprintController re-fires
+	-- RequestSprintTechnique(true) every FullSprintRenewalInterval for as long as IsSprintActive()
+	-- stays true, so a live full sprint's lastFullSprintRequestTime never gets this stale. If it does,
+	-- drop isFullSprinting back off instead of leaving SprintSpeed granted off a stale claim.
+	if record.isFullSprinting and now - record.lastFullSprintRequestTime >= MovementValidationConstants.FullSprintRenewalGraceWindow then
+		record.isFullSprinting = false
+		humanoid.WalkSpeed = computeWalkSpeed(record)
+	end
+
+	-- The renewal timeout above only proves the client is still CLAIMING a slide, not that there's
+	-- still a real slope justifying one -- an exploiter can keep RequestSlide(true) renewals flowing
+	-- indefinitely on completely flat ground, which the renewal check alone can't catch. Mirror the
+	-- client's own SlideController flat-ground decay-to-end timer (SlideFrictionDuration) here
+	-- independently: once non-steep ground has been seen for that long (plus a small network grace),
+	-- force the slide off, same as a legitimate client already does to itself.
+	if record.isSliding then
+		local rayParams = RaycastParams.new()
+		rayParams.FilterType = Enum.RaycastFilterType.Exclude
+		rayParams.FilterDescendantsInstances = { character }
+
+		local slopeAngle = getSlopeAngle(character, rayParams)
+		local isSteep = slopeAngle ~= nil and slopeAngle >= MovementConstants.SlideSteepSlopeAngle
+
+		if isSteep then
+			record.slideFlatSince = nil
+		else
+			record.slideFlatSince = record.slideFlatSince or now
+			if now - record.slideFlatSince > MovementConstants.SlideFrictionDuration + MovementValidationConstants.SlideFlatGroundNetworkGrace then
+				record.isSliding = false
+				record.slideFlatSince = nil
+				record.humanoid.WalkSpeed = computeWalkSpeed(record)
+				warn(string.format("[Anti-Exploit] %s held flat-ground slide too long.", player.Name))
+			end
+		end
+	end
 
 	if record.wasAirborne and not airborneNow then
 		if record.pendingLandingSettleGrace then
@@ -650,7 +790,12 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 	end
 	record.wasAirborne = airborneNow
 
-	if now < record.speedCheckExemptUntil or airborneNow then
+	-- Airborne players used to skip this whole check for as long as they stayed airborne -- not just
+	-- during a dash/leap's own brief exemption window -- letting a modified client set
+	-- AssemblyLinearVelocity to anything mid-air with zero governance. Only the timed exemption below
+	-- (a real ability's own burst) still bypasses the check entirely; airborne now runs it too, just
+	-- against MaxAirborneHorizontalSpeed instead of WalkSpeed (see baseSpeed below).
+	if now < record.speedCheckExemptUntil then
 		record.lastPosition = rootPart.Position
 		record.lastCheckTime = now
 		record.speedViolationStreak = 0
@@ -665,19 +810,21 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 			0,
 			currentPosition.Z - record.lastPosition.Z
 		)
-		local maxAllowedDistance = humanoid.WalkSpeed * MovementConstants.SpeedTolerance * elapsed
+		local baseSpeed = if airborneNow then MovementConstants.MaxAirborneHorizontalSpeed else humanoid.WalkSpeed
+		local maxAllowedDistance = baseSpeed * MovementConstants.SpeedTolerance * elapsed
 
 		if horizontalDelta.Magnitude > maxAllowedDistance then
 			record.speedViolationStreak += 1
 
 			if record.speedViolationStreak >= MovementValidationConstants.SpeedViolationStreakThreshold then
 				warn(string.format(
-					"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at WalkSpeed %d) -- snapped back",
+					"[Anti-Exploit] %s moved %.1f studs in %.3fs (max %.1f at %s speed %.1f) -- snapped back",
 					player.Name,
 					horizontalDelta.Magnitude,
 					elapsed,
 					maxAllowedDistance,
-					humanoid.WalkSpeed
+					if airborneNow then "airborne" else "WalkSpeed",
+					baseSpeed
 				))
 				rootPart.CFrame = CFrame.new(record.lastPosition) * rootPart.CFrame.Rotation
 				record.speedViolationStreak = 0

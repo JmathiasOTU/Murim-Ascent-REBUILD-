@@ -24,6 +24,12 @@ local MovementConstants = table.freeze({
 	SprintSfxStartVolumeFraction = 0.2, -- fraction of the sound's authored volume it starts the ramp at
 	SprintSfxFadeOutSpeed = 6, -- exponential ease-out rate once the technique ends, instead of cutting instantly
 
+	-- SprintController re-fires RequestSprintTechnique(true) at this cadence for as long as
+	-- IsSprintActive() stays true (Sprinting itself, or one of the SprintCarryStates below) -- the
+	-- server (see MovementValidationConstants.FullSprintRenewalGraceWindow) auto-expires the elevated
+	-- SprintSpeed allowance if a renewal doesn't keep arriving on roughly this schedule.
+	FullSprintRenewalInterval = 0.5,
+
 	-- Cross-ability empowerment while SprintController:IsSprintActive() -- applied once, at the
 	-- moment each ability starts, on top of its own normal calculation.
 	SprintSlideSpeedMultiplier = 1.25,
@@ -38,6 +44,18 @@ local MovementConstants = table.freeze({
 
 	SpeedTolerance = 2.5,
 
+	-- Ceiling the airborne branch of MovementValidationService._validatePlayer checks horizontal
+	-- speed against (with SpeedTolerance still applied on top), instead of the old behavior of
+	-- skipping the speed check entirely for the whole time a player is airborne. Derived from the
+	-- fastest legitimate airborne horizontal velocity the game can currently produce: DashPower (150)
+	-- carried into a jump by a roll-cancelled ground dash (see
+	-- MovementValidationConstants.DashCancelExemptionGrace) -- faster than any Qinggong ability's own
+	-- airborne speed (AirDashSpeed 112.5, WallLeapOutwardPower 105, WallClimbLeapOutwardPower 100,
+	-- WallRunSpeed 60). Deliberately its own named constant rather than reusing DashPower/AirDashSpeed,
+	-- since this represents a validation ceiling, not an ability's own power. NOTE: revisit once
+	-- combat knockback/stagger exists (design doc Section 4) -- a legitimate parry knockback could
+	-- plausibly exceed this.
+	MaxAirborneHorizontalSpeed = 150,
 
 	LightLandingSpeedThreshold = 25,
 	
@@ -207,10 +225,23 @@ local MovementConstants = table.freeze({
 	SlideSteepSlopeAngle = 20, -- degrees from vertical-up; at or above this, the slide keeps going (and speeding up) instead of decaying
 	SlideSlopeAcceleration = 20, -- studs/sec^2 gained while continuously on a steep slope
 	SlideMaxSpeed = 140,
+	-- How far above SlideMaxSpeed a Qinggong-Sprint-boosted slide's entry speed is allowed to reach
+	-- (see SlideController._beginSlide) -- raw entry speed is clamped to SlideMaxSpeed BEFORE the
+	-- sprint multiplier is applied, so without a higher ceiling here the sprint bonus would be
+	-- immediately reclamped away and become pointless. MovementValidationService.computeWalkSpeed
+	-- grants this exact ceiling as WalkSpeed whenever isSliding AND isFullSprinting are both true, so
+	-- it must stay in lockstep with the client-side clamp above.
+	SprintSlideMaxSpeedMultiplier = 1.25,
 	SlideUphillMomentumRetention = 0.25, -- fraction of speed kept the instant you turn to face back uphill
 	SlideUphillDeceleration = 9, -- studs/sec^2 bleed while still facing uphill, on top of the instant retention cut
 	SlideStopSpeedThreshold = 2, -- studs/sec; below this we've fully stopped (e.g. killed by the uphill decel) and exit immediately instead of waiting on the flat-ground timer
 	SlideFrictionFloorSpeed = 6, -- speed the friction decay settles at before handing back to normal ground movement
+
+	-- SlideController re-fires RequestSlide(true) at this cadence for as long as the slide continues,
+	-- since a slide's duration is physics-driven and unbounded (unlike Dash's fixed window) -- the
+	-- server (see MovementValidationConstants.SlideRenewalGraceWindow) auto-expires the elevated
+	-- SlideMaxSpeed allowance if a renewal doesn't keep arriving on roughly this schedule.
+	SlideRenewalInterval = 0.5,
 
 	CrouchSpeed = 6,
 

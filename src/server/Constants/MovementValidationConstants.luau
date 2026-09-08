@@ -28,6 +28,25 @@ local MovementValidationConstants = table.freeze({
 	CrouchSpeedSettleGrace = 0.2, -- lets residual pre-crouch velocity decay to CrouchSpeed before checks resume
 	FullSprintSettleGrace = 0.2, -- same idea, for the Qinggong Sprinting technique's WalkSpeed jump
 
+	-- How long the elevated SlideMaxSpeed allowance survives without a fresh RequestSlide(true)
+	-- renewal (see MovementConstants.SlideRenewalInterval, which SlideController renews on) before
+	-- _validatePlayer forces isSliding back off. Wide enough over the ~0.5s renewal cadence to absorb
+	-- one dropped/late renewal plus network jitter without a visible speed snap for a legitimate
+	-- slide, but still short enough that a single unverified claim can't grant SlideMaxSpeed forever.
+	SlideRenewalGraceWindow = 1.2,
+
+	-- Same idea as SlideRenewalGraceWindow, for the Qinggong Sprinting technique's SprintSpeed
+	-- allowance (see MovementConstants.FullSprintRenewalInterval) -- RequestSprintTechnique(true) had
+	-- no expiry at all before this, so a single unverified claim held SprintSpeed permanently.
+	FullSprintRenewalGraceWindow = 1.2,
+
+	-- Small buffer added on top of MovementConstants.SlideFrictionDuration before _validatePlayer
+	-- force-ends a slide that's been on non-steep ground too long (see getSlopeAngle below) -- covers
+	-- the gap between the client's own SlideController decay-to-end timer firing and its
+	-- RequestSlide(false) actually arriving over the network. Not a gameplay-facing allowance -- a
+	-- legitimate slide always ends client-side at SlideFrictionDuration regardless of this.
+	SlideFlatGroundNetworkGrace = 0.3,
+
 	-- Radius for the wall-run/wall-leap proximity sanity check (isNearWall below) -- generous on
 	-- purpose (this is a coarse backstop against claiming either with no wall at all, not precision
 	-- anti-cheat) since the server's own snapshot of the character can already be a few studs behind
