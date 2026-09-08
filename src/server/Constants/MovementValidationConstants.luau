@@ -70,6 +70,21 @@ local MovementValidationConstants = table.freeze({
 	-- moment the server's own airborne poll detects landing (see _validatePlayer), same settle-time
 	-- reasoning as the ground dash's exemptions, just anchored to a different event.
 	AerialActionLandingSettleGrace = 0.3,
+
+	-- Small buffer added on top of a character's own HipHeight + half its root part height when
+	-- isAirborne (above) casts its downward ground-check ray -- covers minor terrain unevenness,
+	-- stairs, and ramps without needing a precise per-surface tolerance, same coarse-check spirit as
+	-- WallProximityCheckDistance/SlideGroundRayDistance elsewhere in this file.
+	GroundCheckMargin = 2,
+
+	-- Vertical speed above which isAirborne (above) treats the player as airborne EVEN IF the ground
+	-- raycast still finds ground within range -- covers the very first tick or two of a legitimate
+	-- jump, where Y position (and so the raycast) hasn't moved yet but Roblox already set the full
+	-- jump velocity instantaneously. Sized well below Roblox's default JumpPower (50 studs/s, unused
+	-- by this project but still the floor for how slow a real jump's launch velocity ever is) so a
+	-- real jump is never missed, while comfortably above ordinary grounded jitter (stair-stepping,
+	-- floor-snap corrections) so standing still doesn't false-flag as airborne.
+	AirborneVerticalVelocityThreshold = 10,
 })
 
 return MovementValidationConstants

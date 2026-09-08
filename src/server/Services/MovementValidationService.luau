@@ -66,10 +66,19 @@ type PlayerMovementRecord = {
 	dashCooldowns: { [string]: newDashCooldownStates.DashCooldownState },
 	lastDashCategory: string,
 	lastAirDashTime: number,
-	-- While now < this, _validatePlayer skips its speed check entirely -- covers a dash's own
-	-- velocity burst, and any other transient (e.g. residual walking momentum not yet decayed to a
-	-- just-lowered WalkSpeed) too fast for WalkSpeed-based validation to tell from a speed hack.
+	-- While now < this, _validatePlayer checks against speedCheckExemptBaseSpeed instead of
+	-- humanoid.WalkSpeed -- covers a dash's own velocity burst, and any other transient (e.g. residual
+	-- walking momentum not yet decayed to a just-lowered WalkSpeed) too fast for WalkSpeed-based
+	-- validation to tell from a speed hack. Deliberately NOT a full bypass of the check (that would
+	-- give a modified client a zero-governance teleport window for the whole grace period) -- see
+	-- speedCheckExemptBaseSpeed.
 	speedCheckExemptUntil: number,
+	-- The ceiling _validatePlayer checks against while now < speedCheckExemptUntil, set alongside it
+	-- at every call site to whatever that specific grant's own real max speed is (DashPower for a
+	-- ground dash or its roll-cancel settle, MaxAirborneHorizontalSpeed for an aerial action's landing
+	-- settle, SprintSpeed/WalkSpeed-or-RunSpeed for the sprint/crouch settles) -- a blanket "no check
+	-- at all" was too permissive, but a single shared ceiling would be wrong for most of these too.
+	speedCheckExemptBaseSpeed: number,
 	-- Set by _onRequestAirDash/_onRequestLedgeJump, consumed by _validatePlayer the moment its own
 	-- airborne poll observes the resulting landing -- a residual-momentum settle grace can't be
 	-- granted up front like the ground dash's, since when that landing actually happens isn't known
@@ -89,9 +98,47 @@ type PlayerMovementRecord = {
 	lastAbilityRequestTime: { [string]: number },
 }
 
-local function isAirborne(humanoid: Humanoid): boolean
-	local state = humanoid:GetState()
-	return state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+-- Humanoid:GetState() is NOT server-authoritative for a player's own character. Roblox network-owns
+-- a player's character parts to that player's client by default (this codebase never calls
+-- SetNetworkOwner to change that), and Humanoid state transitions (Running/Jumping/Freefall/Landed)
+-- are physics-derived -- computed on whichever side owns that physics, which for a player's own
+-- Humanoid is the client, with the resulting state then replicated to the server as an ordinary
+-- property, same as CFrame/AssemblyLinearVelocity already are (both of which this file already
+-- treats as untrusted -- see isNearWall/isOverGround/getSlopeAngle above). This project's OWN client
+-- code confirms ChangeState is an ordinary, reachable API with real effect for a player's own
+-- Humanoid: WallRunController._tryWallLeap and WallClingController._tryWallClimbLeap both call
+-- humanoid:ChangeState(Enum.HumanoidStateType.Freefall) directly from a LocalScript. A modified
+-- client could call the same API with any state it likes and have GetState() report it server-side
+-- too, bypassing every legality check gated on this function regardless of real physical position.
+-- Independently verified instead via a downward raycast -- the same "don't trust a client-owned
+-- physics property" pattern as the other coarse geometry checks in this file.
+local function isAirborne(character: Model, record: PlayerMovementRecord): boolean
+	local humanoid, rootPart = record.humanoid, record.rootPart
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { character }
+
+	-- HipHeight + half the root part's height approximates the distance from rootPart.Position (its
+	-- center) down to the character's feet when standing normally -- derived from the character's own
+	-- proportions rather than a guessed fixed stud value, since HipHeight varies by rig/avatar.
+	-- GroundCheckMargin is a small buffer on top for uneven terrain/stairs/ramps, same coarse-check
+	-- spirit as this file's other geometry sanity checks, not pixel-perfect collision.
+	local groundCheckDistance = humanoid.HipHeight + (rootPart.Size.Y / 2) + MovementValidationConstants.GroundCheckMargin
+	local hasGroundNearby = workspace:Raycast(rootPart.Position, Vector3.new(0, -groundCheckDistance, 0), rayParams) ~= nil
+
+	-- Ground-distance alone isn't enough: the instant a legitimate jump starts, Y position (and so
+	-- this raycast) hasn't moved yet, so a real jump/double-jump/air-dash attempted in its very first
+	-- tick or two would still see "ground within range" and be wrongly rejected. Widen with vertical
+	-- velocity too -- meaningfully non-zero in EITHER direction also counts as airborne, even while
+	-- still within raycast range. AssemblyLinearVelocity is client-owned and spoofable same as
+	-- GetState() was, but that's safe here: this only WIDENS what counts as airborne (an OR), so a
+	-- spoofed velocity can make this function more permissive for the caller, never less safe -- it
+	-- can't be used to force a ground-only ability through, since the raycast above remains the actual
+	-- source of truth for "is there ground right here regardless of what velocity claims."
+	local isMovingVertically = math.abs(rootPart.AssemblyLinearVelocity.Y) > MovementValidationConstants.AirborneVerticalVelocityThreshold
+
+	return not hasGroundNearby or isMovingVertically
 end
 
 -- Coarse geometry sanity check for wall running/leaping: is there actually any collidable part
@@ -217,6 +264,9 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		lastDashCategory = DashCategory.Forward,
 		lastAirDashTime = -math.huge,
 		speedCheckExemptUntil = 0,
+		-- Never actually read while speedCheckExemptUntil is 0 (now < 0 is never true) -- WalkSpeed is
+		-- just a sane placeholder rather than leaving it at a meaningless 0.
+		speedCheckExemptBaseSpeed = MovementConstants.WalkSpeed,
 		wasAirborne = false,
 		pendingLandingSettleGrace = false,
 		hasDoubleJumped = false,
@@ -261,6 +311,9 @@ function MovementValidationService._onRequestDash(self: MovementValidationServic
 	cooldown.lastDashTime = now
 	record.lastDashCategory = category
 	record.speedCheckExemptUntil = now + MovementConstants.DashDuration
+	-- The dash's own held velocity burst -- DashPower is exactly what WalkSpeed gets replaced by for
+	-- the duration, so it's the correct ceiling rather than a full bypass.
+	record.speedCheckExemptBaseSpeed = MovementConstants.DashPower
 end
 
 -- Airborne movement is already fully exempt from the speed check (see isAirborne in
@@ -269,7 +322,8 @@ end
 -- same reasoning as the ground dash's own grant.
 function MovementValidationService._onRequestAirDash(self: MovementValidationService, player: Player)
 	local record = self._records[player]
-	if not record or not player.Character then
+	local character = player.Character
+	if not record or not character then
 		return
 	end
 
@@ -278,7 +332,7 @@ function MovementValidationService._onRequestAirDash(self: MovementValidationSer
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted an air dash while grounded.", player.Name))
 		return
 	end
@@ -290,6 +344,9 @@ function MovementValidationService._onRequestAirDash(self: MovementValidationSer
 
 	record.lastAirDashTime = now
 	record.speedCheckExemptUntil = now + MovementConstants.AirDashDuration
+	-- Airborne the whole time this fires, so the airborne ceiling (comfortably above AirDashSpeed
+	-- 112.5) is the right fit -- not ground-dash speed, which this ability never reaches.
+	record.speedCheckExemptBaseSpeed = MovementConstants.MaxAirborneHorizontalSpeed
 	record.pendingLandingSettleGrace = true
 end
 
@@ -298,7 +355,8 @@ end
 -- legality is just "actually airborne" + "hasn't already used this excursion's charge."
 function MovementValidationService._onRequestDoubleJump(self: MovementValidationService, player: Player)
 	local record = self._records[player]
-	if not record or not player.Character then
+	local character = player.Character
+	if not record or not character then
 		return
 	end
 
@@ -306,7 +364,7 @@ function MovementValidationService._onRequestDoubleJump(self: MovementValidation
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a double jump while grounded.", player.Name))
 		return
 	end
@@ -380,7 +438,7 @@ function MovementValidationService._onRequestWallRun(self: MovementValidationSer
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall run while grounded.", player.Name))
 		return
 	end
@@ -414,7 +472,7 @@ function MovementValidationService._onRequestWallLeap(self: MovementValidationSe
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall leap while grounded.", player.Name))
 		return
 	end
@@ -446,7 +504,7 @@ function MovementValidationService._onRequestWallCling(self: MovementValidationS
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall cling while grounded.", player.Name))
 		return
 	end
@@ -477,7 +535,7 @@ function MovementValidationService._onRequestWallBoost(self: MovementValidationS
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall boost while grounded.", player.Name))
 		return
 	end
@@ -501,7 +559,8 @@ end
 -- the client's own deadline window, enforced by the transition table.
 function MovementValidationService._onRequestWallClingDoubleJump(self: MovementValidationService, player: Player)
 	local record = self._records[player]
-	if not record or not player.Character then
+	local character = player.Character
+	if not record or not character then
 		return
 	end
 
@@ -509,7 +568,7 @@ function MovementValidationService._onRequestWallClingDoubleJump(self: MovementV
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall cling double jump while grounded.", player.Name))
 		return
 	end
@@ -532,7 +591,7 @@ function MovementValidationService._onRequestWallClimbLeap(self: MovementValidat
 		return
 	end
 
-	if not isAirborne(record.humanoid) then
+	if not isAirborne(character, record) then
 		warn(string.format("[Anti-Exploit] %s attempted a wall climb leap while grounded.", player.Name))
 		return
 	end
@@ -585,6 +644,8 @@ function MovementValidationService._onRequestRollCancel(self: MovementValidation
 	-- combine before settling. This buys that settling time before strict speed validation
 	-- resumes, instead of rubberbanding the player mid-transient.
 	record.speedCheckExemptUntil = now + MovementValidationConstants.DashCancelExemptionGrace
+	-- Same residual dash velocity settling out, same DashPower ceiling as the ground dash itself.
+	record.speedCheckExemptBaseSpeed = MovementConstants.DashPower
 	record.lastPosition = record.rootPart.Position
 	record.lastCheckTime = now
 
@@ -640,8 +701,16 @@ function MovementValidationService._onRequestSprintTechnique(self: MovementValid
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
 	if isFullSprinting then
 		record.lastFullSprintRequestTime = os.clock()
-		record.speedCheckExemptUntil =
-			math.max(record.speedCheckExemptUntil, os.clock() + MovementValidationConstants.FullSprintSettleGrace)
+		local settleUntil = os.clock() + MovementValidationConstants.FullSprintSettleGrace
+		-- math.max means this grant doesn't always win (an overlapping longer exemption from another
+		-- source could already extend past it) -- only take over speedCheckExemptBaseSpeed when this
+		-- grant is actually the one extending speedCheckExemptUntil, so the two stay in sync instead of
+		-- a shorter-but-later call stomping the base speed a longer exemption is still relying on.
+		if settleUntil > record.speedCheckExemptUntil then
+			-- The technique's own top speed -- already the ceiling this settle window is easing INTO.
+			record.speedCheckExemptBaseSpeed = MovementConstants.SprintSpeed
+		end
+		record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, settleUntil)
 	end
 end
 
@@ -709,9 +778,19 @@ function MovementValidationService._onRequestCrouch(self: MovementValidationServ
 	end
 	record.lastCrouchRequestTime = now
 
+	-- Captured BEFORE isCrouching flips below -- this settle window exists to cover residual
+	-- PRE-crouch velocity decaying toward CrouchSpeed, not the (lower) crouched speed itself.
+	local preCrouchSpeed = if record.isSprinting then MovementConstants.RunSpeed else MovementConstants.WalkSpeed
+
 	record.isCrouching = true
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
-	record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, now + MovementValidationConstants.CrouchSpeedSettleGrace)
+	local settleUntil = now + MovementValidationConstants.CrouchSpeedSettleGrace
+	-- Same "only take over the base speed if this grant is actually the one winning" guard as the
+	-- full-sprint settle above -- see its comment.
+	if settleUntil > record.speedCheckExemptUntil then
+		record.speedCheckExemptBaseSpeed = preCrouchSpeed
+	end
+	record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, settleUntil)
 end
 
 function MovementValidationService._validatePlayer(_self: MovementValidationService, player: Player, record: PlayerMovementRecord, now: number)
@@ -721,7 +800,12 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 	end
 
 	local humanoid, rootPart = record.humanoid, record.rootPart
-	local airborneNow = isAirborne(humanoid)
+	-- Runs a raycast now (see isAirborne's own comment for why GetState() can't be trusted) instead of
+	-- a free property read, once per player per ValidationTickRate tick (15Hz) -- the same order of
+	-- magnitude as the wall-proximity raycasts (isNearWall) already running elsewhere in this file per
+	-- ability request, so this steady-state per-tick cost should be fine, but noting it explicitly
+	-- rather than assuming: worth revisiting if this service's player count or tick rate grows a lot.
+	local airborneNow = isAirborne(character, record)
 
 	-- State hygiene, not a speed fix (see the airborne speed check below, which no longer trusts
 	-- WalkSpeed at all while airborne): a dropped RequestSlide(false) packet could otherwise leave
@@ -774,7 +858,19 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 		-- (a cheap proxy, not full slope-projected velocity math -- see
 		-- SlideDownhillVelocityThreshold's own comment) before treating the slope as one actually
 		-- being slid down.
-		local isMovingDownhill = rootPart.AssemblyLinearVelocity.Y < MovementValidationConstants.SlideDownhillVelocityThreshold
+		--
+		-- Derived from server-observed position deltas rather than read off
+		-- rootPart.AssemblyLinearVelocity.Y directly -- that's a physics property of a client-owned
+		-- part, exactly as spoofable as raw position itself, which is why the vertical-ascent check
+		-- above already switched to position-delta math instead of trusting it; this is the same
+		-- category of value a few lines away and shouldn't trust it either. record.lastPosition/
+		-- record.lastCheckTime still hold the PREVIOUS tick's sample here -- the unconditional update
+		-- to this tick's values happens once, at the very end of this function, well after this block
+		-- runs -- so this is a genuine server-observed delta, not a same-tick no-op.
+		local slideCheckElapsed = now - record.lastCheckTime
+		local isMovingDownhill = if slideCheckElapsed > 0
+			then (rootPart.Position.Y - record.lastPosition.Y) / slideCheckElapsed < MovementValidationConstants.SlideDownhillVelocityThreshold
+			else false
 
 		if isSteep and isMovingDownhill then
 			record.slideFlatSince = nil
@@ -792,7 +888,16 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 	if record.wasAirborne and not airborneNow then
 		if record.pendingLandingSettleGrace then
 			record.pendingLandingSettleGrace = false
-			record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, now + MovementValidationConstants.AerialActionLandingSettleGrace)
+			local settleUntil = now + MovementValidationConstants.AerialActionLandingSettleGrace
+			-- Same "only take over the base speed if this grant is actually the one winning" guard as
+			-- the sprint/crouch settles above -- see their comments.
+			if settleUntil > record.speedCheckExemptUntil then
+				-- Every ability that grants this (air dash, ledge jump, wall run, wall leap, wall
+				-- cling, wall boost, wall climb leap) carries residual AIRBORNE momentum into the
+				-- landing, not ground-dash speed -- same ceiling the general airborne check uses.
+				record.speedCheckExemptBaseSpeed = MovementConstants.MaxAirborneHorizontalSpeed
+			end
+			record.speedCheckExemptUntil = math.max(record.speedCheckExemptUntil, settleUntil)
 		end
 		record.hasDoubleJumped = false
 	end
@@ -800,16 +905,17 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 
 	-- Airborne players used to skip this whole check for as long as they stayed airborne -- not just
 	-- during a dash/leap's own brief exemption window -- letting a modified client set
-	-- AssemblyLinearVelocity to anything mid-air with zero governance. Only the timed exemption below
-	-- (a real ability's own burst) still bypasses the check entirely; airborne now runs it too, just
+	-- AssemblyLinearVelocity to anything mid-air with zero governance. Airborne now runs it too, just
 	-- against MaxAirborneHorizontalSpeed instead of WalkSpeed (see baseSpeed below).
-	if now < record.speedCheckExemptUntil then
-		record.lastPosition = rootPart.Position
-		record.lastCheckTime = now
-		record.speedViolationStreak = 0
-		return
-	end
-
+	--
+	-- A speedCheckExemptUntil window used to be a hard early return here -- full invisibility to the
+	-- speed check for the whole grace period, not just a raised allowance. Every ability that grants
+	-- one (ground dash, roll cancel, the aerial-action landing settle, the sprint/crouch settles) was
+	-- treated identically despite having wildly different real max speeds, so a modified client could
+	-- teleport arbitrarily far during ANY of them with zero server record of it being invalid. Now it's
+	-- folded into the same ceiling selection as the airborne/grounded cases below: still validated,
+	-- just against speedCheckExemptBaseSpeed (set alongside speedCheckExemptUntil at each grant site to
+	-- that specific ability's own real max speed) instead of a full bypass.
 	local elapsed = now - record.lastCheckTime
 	if elapsed > 0 then
 		local currentPosition = rootPart.Position
@@ -818,13 +924,17 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 			0,
 			currentPosition.Z - record.lastPosition.Z
 		)
-		local baseSpeed = if airborneNow then MovementConstants.MaxAirborneHorizontalSpeed else humanoid.WalkSpeed
+		local isExempt = now < record.speedCheckExemptUntil
+		local baseSpeed = if isExempt then record.speedCheckExemptBaseSpeed
+			elseif airborneNow then MovementConstants.MaxAirborneHorizontalSpeed
+			else humanoid.WalkSpeed
 		-- Grounded SpeedTolerance (2.5x) absorbs Humanoid's own animation/ground-controller jitter --
-		-- airborne motion is a clean physics trajectory with no animation fighting it, so it gets the
-		-- tighter AirborneSpeedTolerance instead (see that constant's own comment for the math this
-		-- was sized against). Reusing SpeedTolerance here would've allowed 375 studs/s, far looser
-		-- than MaxAirborneHorizontalSpeed was meant to enforce.
-		local tolerance = if airborneNow then MovementConstants.AirborneSpeedTolerance else MovementConstants.SpeedTolerance
+		-- an exemption window or airborne motion is a clean physics burst/trajectory with no animation
+		-- fighting it, so both get the tighter AirborneSpeedTolerance instead (see that constant's own
+		-- comment for the math this was sized against). Reusing SpeedTolerance here would've allowed
+		-- 375 studs/s off MaxAirborneHorizontalSpeed alone, far looser than that ceiling was meant to
+		-- enforce.
+		local tolerance = if isExempt or airborneNow then MovementConstants.AirborneSpeedTolerance else MovementConstants.SpeedTolerance
 		local maxAllowedDistance = baseSpeed * tolerance * elapsed
 
 		local horizontalViolated = horizontalDelta.Magnitude > maxAllowedDistance
@@ -856,7 +966,7 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 						horizontalDelta.Magnitude,
 						elapsed,
 						maxAllowedDistance,
-						if airborneNow then "airborne" else "WalkSpeed",
+						if isExempt then "exempt" elseif airborneNow then "airborne" else "WalkSpeed",
 						baseSpeed
 					))
 				end
