@@ -57,6 +57,9 @@
         "RequestWallClimbLeap": {
           "$className": "RemoteEvent"
         },
+        "RequestAttack": {
+          "$className": "RemoteEvent"
+        },
         "NotifyFootstep": {
           "$className": "UnreliableRemoteEvent"
         },

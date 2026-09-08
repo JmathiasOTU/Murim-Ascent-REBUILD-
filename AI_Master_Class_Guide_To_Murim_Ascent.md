@@ -58,3 +58,6 @@ General cooldown and state validation (Section 3) is necessary but not sufficien
 ## 8. GUI & Persistence
 * **GUI Creation:** Never create `ScreenGui`s or GUI elements via code. Every GUI is hand-built in Studio; scripts only `WaitForChild` into existing GUI instances to control logic.
 * **Data Saving:** All player data must be session-locked on join. Wipes and critical data operations must be atomic, fail-safe operations to prevent data loss, combat-logging, or exploit-driven evasion.
+
+## 9. No Band aid Validation
+* No "Band-Aid" Validation (Strict Root-Cause Resolution): Never artificially pad, inflate, or hardcode arbitrary tolerances into server-side checks (e.g., adding flat values to distance, speed, or time validations) to paper over network latency or desync. This lazy anti-pattern creates over-permissive validation and introduces massive exploit vulnerabilities. Synchronization and latency issues must always be solved at the mathematical root cause—using precise lag compensation, velocity projection, or strict data-driven margins—never by relaxing the server's rules.

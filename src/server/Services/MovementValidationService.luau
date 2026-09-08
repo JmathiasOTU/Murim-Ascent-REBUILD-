@@ -1054,9 +1054,29 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 			currentPosition.Z - record.lastPosition.Z
 		)
 		local isExempt = now < record.speedCheckExemptUntil
-		local baseSpeed = if isExempt then record.speedCheckExemptBaseSpeed
-			elseif airborneNow then MovementConstants.MaxAirborneHorizontalSpeed
-			else humanoid.WalkSpeed
+		-- Whatever ceiling would apply to ORDINARY (non-exempt) motion right now -- computed
+		-- unconditionally, not just in the isExempt-false branch, because an exemption's own baseSpeed
+		-- is set once at its grant site and can go stale relative to a legitimately-changed WalkSpeed
+		-- or airborne state without ever being told to re-check. Concretely: the Qinggong Sprinting
+		-- technique's full-sprint settle grant (see _onRequestSprintTechnique) re-fires every
+		-- FullSprintRenewalInterval (0.5s) for as long as sprint stays held, each renewal opening a
+		-- fresh FullSprintSettleGrace (0.2s) window pinned to SprintSpeed (38) -- so isExempt is true
+		-- for ~40% of any sprint's duration (see FullSprintSettleGrace's own comment) off a ceiling far
+		-- below what a DIFFERENT, more current source can legitimately demand mid-sprint: WalkSpeed
+		-- jumping to SlideMaxSpeed * SprintSlideMaxSpeedMultiplier (175) the instant a sprint-boosted
+		-- slide begins, or the airborne ceiling (MaxAirborneHorizontalSpeed, 150) the instant a
+		-- wall-run/wall-leap chain goes airborne while that stale exemption happens to still be open.
+		local groundOrAirBaseline = if airborneNow then MovementConstants.MaxAirborneHorizontalSpeed else humanoid.WalkSpeed
+		-- Deliberately math.max, not a priority chain (never "isExempt wins" or "airborne/grounded
+		-- wins" outright): either ordering can silently discard a legitimately higher value from the
+		-- side that loses. A strict "isExempt always wins" reintroduces the sprint-settle masking above.
+		-- A strict "groundOrAirBaseline always wins while airborne" would instead discard a wall
+		-- leap/wall climb leap's OWN dedicated exemption if either ever granted more than the generic
+		-- MaxAirborneHorizontalSpeed ceiling (covering its outward burst plus the instant positional
+		-- offset applied alongside it) -- silently downgrading a legitimate high-speed leap back to the
+		-- generic ceiling and reintroducing false-positive rubberbanding from the opposite direction.
+		-- Taking the max of both never discards either value, it just keeps whichever is actually larger.
+		local baseSpeed = if isExempt then math.max(record.speedCheckExemptBaseSpeed, groundOrAirBaseline) else groundOrAirBaseline
 		-- Grounded SpeedTolerance (2.5x) absorbs Humanoid's own animation/ground-controller jitter --
 		-- irrelevant for a genuine physics burst (a clean trajectory with nothing animation-driven
 		-- fighting it), which is why airborne motion gets the tighter AirborneSpeedTolerance instead.
@@ -1065,14 +1085,21 @@ function MovementValidationService._validatePlayer(_self: MovementValidationServ
 		-- Speed-range), and a legitimate crouch transition's own animation/root-part swing could
 		-- plausibly exceed a 1.5x allowance built around a ~16-24 base -- applying the tight tolerance
 		-- there would false-positive ordinary crouching, not catch an exploit. isPhysicsBurst separates
-		-- the two by checking the exemption's OWN base speed rather than assuming every exemption is
-		-- the same shape: ground dash and roll cancel both use DashPower (150, qualifies), the aerial-
-		-- landing settle now uses a measured pre-landing speed capped at MaxAirborneHorizontalSpeed (150,
-		-- qualifies only for an actually-fast landing), wall leap/wall climb leap use
-		-- MaxAirborneHorizontalSpeed directly (150, qualifies) -- crouch-settle (WalkSpeed/RunSpeed) and
-		-- full-sprint-settle (SprintSpeed, 38) both fall well under 150 and correctly get the looser
-		-- grounded tolerance instead.
-		local isPhysicsBurst = isExempt and record.speedCheckExemptBaseSpeed >= MovementConstants.MaxAirborneHorizontalSpeed
+		-- the two -- but now that baseSpeed can resolve from EITHER source above, it has to check which
+		-- one actually WON, not just whether the raw exemption value in isolation happens to clear the
+		-- threshold: a grounded exemption can be at DashPower (150, clears the threshold on its own) and
+		-- still lose to an even higher, animation-driven groundOrAirBaseline that overlaps with it (e.g.
+		-- a ground dash fired mid-sprint-boosted-slide, WalkSpeed already at 175) -- that grounded,
+		-- controller-driven motion should get the looser grounded tolerance regardless of the losing
+		-- exemption's own magnitude, the same reasoning crouch-settle/full-sprint-settle already rely on.
+		-- Ground dash/roll cancel (DashPower, 150) with no such overlap, the aerial-landing settle's
+		-- measured pre-landing speed (capped at MaxAirborneHorizontalSpeed, 150, only for an actually-fast
+		-- landing), and wall leap/wall climb leap (MaxAirborneHorizontalSpeed, 150) all still qualify
+		-- exactly as before once they're actually the winning source; crouch-settle (WalkSpeed/RunSpeed)
+		-- and full-sprint-settle (SprintSpeed, 38) both fall well under the threshold either way.
+		local isPhysicsBurst = isExempt
+			and record.speedCheckExemptBaseSpeed >= groundOrAirBaseline
+			and record.speedCheckExemptBaseSpeed >= MovementConstants.MaxAirborneHorizontalSpeed
 		local tolerance = if isPhysicsBurst or airborneNow then MovementConstants.AirborneSpeedTolerance else MovementConstants.SpeedTolerance
 		local maxAllowedDistance = baseSpeed * tolerance * elapsed
 

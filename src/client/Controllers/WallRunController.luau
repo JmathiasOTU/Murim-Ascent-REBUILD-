@@ -46,6 +46,11 @@ export type WallRunController = typeof(setmetatable(
 		_leapEndThread: thread?,
 		_chainCount: number,
 		_rayParams: RaycastParams?,
+		-- -1..1: which side the current wall is on relative to the character's own facing (+1 fully
+		-- right, -1 fully left), 0 whenever not actively wall running. Read by CameraController every
+		-- frame (GetWallLeanAmount) to drive the away-from-wall camera lean -- see CameraConstants.
+		-- WallRunLeanMaxAngleDegrees's own comment for why this takes over from the strafe lean.
+		_wallLeanAmount: number,
 	},
 	WallRunController
 ))
@@ -69,6 +74,7 @@ function WallRunController.new(): WallRunController
 		_leapEndThread = nil,
 		_chainCount = 0,
 		_rayParams = nil,
+		_wallLeanAmount = 0,
 	}, WallRunController)
 
 	return self
@@ -144,6 +150,14 @@ function WallRunController._stopRunPhysics(self: WallRunController)
 	if self._alignOrientation then
 		self._alignOrientation.Enabled = false
 	end
+	-- Zeroed here (not just left to decay) so CameraController never keeps leaning toward a wall
+	-- that's no longer there the instant a run ends -- every teardown path funnels through this.
+	self._wallLeanAmount = 0
+end
+
+-- Read by CameraController every frame -- see the field's own comment for the sign convention.
+function WallRunController.GetWallLeanAmount(self: WallRunController): number
+	return self._wallLeanAmount
 end
 
 function WallRunController._beginWallRun(self: WallRunController, humanoid: Humanoid, rootPart: BasePart)
@@ -201,6 +215,13 @@ function WallRunController._beginWallRun(self: WallRunController, humanoid: Huma
 		if not cachedHit then
 			return
 		end
+
+		-- rootPart.CFrame.RightVector, not the camera's -- alignOrientation is actively turning
+		-- rootPart to face runDirection every tick, so this stays a stable "which side relative to
+		-- travel" reading even if the player free-looks the camera independently. -cachedHit.Normal
+		-- points from open air back toward the wall's surface, so this is +1 when that's toward the
+		-- character's right (wall on the right) and -1 when it's toward their left.
+		self._wallLeanAmount = rootPart.CFrame.RightVector:Dot(-cachedHit.Normal)
 
 		local cross1 = cachedHit.Normal:Cross(UP)
 		local cross2 = UP:Cross(cachedHit.Normal)

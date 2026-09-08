@@ -12,11 +12,13 @@ local CameraConstants = require(Shared.Constants.CameraConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local SprintController = require(script.Parent.SprintController)
+local WallRunController = require(script.Parent.WallRunController)
 
 local player = Players.LocalPlayer
 
 local BIND_NAME = "CameraLeanAndDip"
 local MAX_LEAN_ANGLE = math.rad(CameraConstants.LeanMaxAngleDegrees)
+local MAX_WALL_RUN_LEAN_ANGLE = math.rad(CameraConstants.WallRunLeanMaxAngleDegrees)
 
 -- Sampled once at module load, same fallback pattern as below -- CurrentCamera may not exist yet
 -- for a brand-new player at this exact moment.
@@ -131,12 +133,21 @@ function CameraController._setupCharacter(self: CameraController, character: Mod
 			end
 		end
 
-		local moveDirection = humanoid.MoveDirection
-		local strafeAmount = 0
-		if moveDirection.Magnitude > CameraConstants.StrafeThreshold then
-			strafeAmount = camera.CFrame.RightVector:Dot(moveDirection.Unit)
+		-- Wall-run lean takes over from the strafe lean below whenever it's active (nonzero) --
+		-- MoveDirection during a wall run just tracks residual forward input along the wall, not a
+		-- real side-to-side strafe, so blending the two would fight rather than combine cleanly.
+		local wallLeanAmount = WallRunController:GetWallLeanAmount()
+		local targetRoll: number
+		if wallLeanAmount ~= 0 then
+			targetRoll = wallLeanAmount * MAX_WALL_RUN_LEAN_ANGLE
+		else
+			local moveDirection = humanoid.MoveDirection
+			local strafeAmount = 0
+			if moveDirection.Magnitude > CameraConstants.StrafeThreshold then
+				strafeAmount = camera.CFrame.RightVector:Dot(moveDirection.Unit)
+			end
+			targetRoll = -strafeAmount * MAX_LEAN_ANGLE
 		end
-		local targetRoll = -strafeAmount * MAX_LEAN_ANGLE
 
 		local leanAlpha = 1 - math.exp(-CameraConstants.LeanSpeed * dt)
 		currentRoll += (targetRoll - currentRoll) * leanAlpha
