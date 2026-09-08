@@ -9,6 +9,7 @@ local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
+local hasEnoughQinggong = require(Shared.Utils.HasEnoughQinggong)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local MovementController = require(script.Parent.MovementController)
 
@@ -69,8 +70,13 @@ function AirDashController._applyImpulse(self: AirDashController, rootPart: Base
 	local verticalVelocity = Vector3.new(0, cameraPitch * MovementConstants.AirDashSpeed * MovementConstants.AirDashVerticalMult, 0)
 	local launchVelocity = forwardVelocity + verticalVelocity
 
-	local wallHit = Workspace:Raycast(rootPart.Position, lookVector * MovementConstants.AirDashWallSoftenRange, self._rayParams)
-	if wallHit then
+	-- Cast along flatForward (the actual travel direction) rather than the raw LookVector -- any
+	-- residual pitch on the root part (e.g. leftover from a slope/ramp) would otherwise aim this ray
+	-- somewhere the dash isn't even going. Also only softens against an actual wall (steep surface),
+	-- same threshold WallRun/WallCling use for "is this a wall" -- without it, a shallow floor/ramp
+	-- lip within the short softening range reads as a wall and kills the whole dash for no reason.
+	local wallHit = Workspace:Raycast(rootPart.Position, flatForward * MovementConstants.AirDashWallSoftenRange, self._rayParams)
+	if wallHit and math.abs(wallHit.Normal.Y) < MovementConstants.WallFlatnessThreshold then
 		-- Project out only the into-wall component instead of zeroing the whole impulse, so a
 		-- glancing dash still carries you past the wall rather than stopping dead against it.
 		local intoWall = launchVelocity:Dot(wallHit.Normal)
@@ -90,6 +96,10 @@ function AirDashController._tryAirDash(self: AirDashController, humanoid: Humano
 
 	local now = os.clock()
 	if now - self._lastAirDashTime < MovementConstants.AirDashCooldown then
+		return
+	end
+
+	if not hasEnoughQinggong(MovementConstants.QinggongCostAirDash) then
 		return
 	end
 	self._lastAirDashTime = now

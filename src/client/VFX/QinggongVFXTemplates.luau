@@ -28,6 +28,13 @@ local QinggongVFXTemplates = table.freeze({
 	AirDashVFX = qinggongVFXFolder:WaitForChild("AirDashVFX") :: BasePart,
 	DoubleJumpVFX = qinggongVFXFolder:WaitForChild("DoubleJumpVFX") :: BasePart,
 	LedgeJumpVFX = qinggongVFXFolder:WaitForChild("LedgeJumpVFX") :: BasePart,
+	WallLeapVfx = qinggongVFXFolder:WaitForChild("WallLeapVfx") :: BasePart,
+	-- Welded continuously to all four limbs while WallHanging, re-tinted per grip (see
+	-- MovementVFXController) -- unlike the burst effects above, this isn't a one-shot template.
+	MovementDust = qinggongVFXFolder:WaitForChild("MovementDust") :: BasePart,
+	-- Welded behind the HRP for as long as the Qinggong Sprinting technique is fully active (see
+	-- MovementVFXController/SprintController) -- a continuous wind trail, not a one-shot burst.
+	SprintVFX = qinggongVFXFolder:WaitForChild("SprintVFX") :: BasePart,
 	DoubleJumpTrailAttachment0 = doubleJumpTrailAttachment0,
 	DoubleJumpTrailAttachment1 = doubleJumpTrailAttachment1,
 	DoubleJumpTrailTrail = doubleJumpTrailTrail,

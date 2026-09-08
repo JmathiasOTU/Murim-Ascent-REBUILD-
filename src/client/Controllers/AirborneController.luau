@@ -8,8 +8,10 @@ local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
+local hasEnoughQinggong = require(Shared.Utils.HasEnoughQinggong)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local MovementController = require(script.Parent.MovementController)
+local SprintController = require(script.Parent.SprintController)
 
 local requestLedgeJump = ReplicatedStorage.Remotes.RequestLedgeJump :: RemoteEvent
 
@@ -40,13 +42,15 @@ local function disconnectAll(connections: { RBXScriptConnection })
 end
 
 -- A fixed forward+up launch, fully overwriting whatever velocity the slide/jump already had --
--- same one-shot-impulse shape as the other Qinggong actions.
+-- same one-shot-impulse shape as the other Qinggong actions. Qinggong Sprinting sends this farther
+-- ("your ledge jump also goes a bit farther").
 local function applyLedgeJumpImpulse(rootPart: BasePart)
 	local flatLook = rootPart.CFrame.LookVector * Vector3.new(1, 0, 1)
 	local flatForward = if flatLook.Magnitude > 0.001 then flatLook.Unit else rootPart.CFrame.LookVector
 
-	rootPart.AssemblyLinearVelocity = (flatForward * MovementConstants.LedgeJumpForwardPower)
-		+ Vector3.new(0, MovementConstants.LedgeJumpUpPower, 0)
+	local multiplier = if SprintController:IsSprintActive() then MovementConstants.SprintLedgeJumpMultiplier else 1
+	rootPart.AssemblyLinearVelocity = (flatForward * MovementConstants.LedgeJumpForwardPower * multiplier)
+		+ Vector3.new(0, MovementConstants.LedgeJumpUpPower * multiplier, 0)
 end
 
 function AirborneController.new(): AirborneController
@@ -177,7 +181,7 @@ function AirborneController._setupCharacter(self: AirborneController, character:
 					-- A slide running off a real edge (vs. jumping mid-slide over ground that keeps
 					-- going) launches instead of just hopping -- LedgeJumping resolves through the
 					-- ordinary Jumping->Freefall flow afterward like any other jump.
-					if wasSliding and self:_isAtLedgeEdge(rootPart) then
+					if wasSliding and self:_isAtLedgeEdge(rootPart) and hasEnoughQinggong(MovementConstants.QinggongCostLedgeJump) then
 						movementFSM:TransitionTo(MovementState.LedgeJumping)
 						applyLedgeJumpImpulse(rootPart)
 						requestLedgeJump:FireServer()

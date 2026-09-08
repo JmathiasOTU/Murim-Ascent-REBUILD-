@@ -15,6 +15,9 @@
         "RequestSprint": {
           "$className": "RemoteEvent"
         },
+        "RequestSprintTechnique": {
+          "$className": "RemoteEvent"
+        },
         "RequestDash": {
           "$className": "RemoteEvent"
         },
@@ -36,6 +39,24 @@
         "RequestCrouch": {
           "$className": "RemoteEvent"
         },
+        "RequestWallRun": {
+          "$className": "RemoteEvent"
+        },
+        "RequestWallLeap": {
+          "$className": "RemoteEvent"
+        },
+        "RequestWallCling": {
+          "$className": "RemoteEvent"
+        },
+        "RequestWallBoost": {
+          "$className": "RemoteEvent"
+        },
+        "RequestWallClingDoubleJump": {
+          "$className": "RemoteEvent"
+        },
+        "RequestWallClimbLeap": {
+          "$className": "RemoteEvent"
+        },
         "NotifyFootstep": {
           "$className": "UnreliableRemoteEvent"
         },
@@ -48,6 +69,9 @@
     "ServerScriptService": {
       "Server": {
         "$path": "src/server"
+      },
+      "ServerPackages": {
+        "$path": "ServerPackages"
       }
     },
 

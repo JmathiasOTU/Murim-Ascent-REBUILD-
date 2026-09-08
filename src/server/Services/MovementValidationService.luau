@@ -11,8 +11,10 @@ local newDashCooldownStates = require(Shared.Utils.NewDashCooldownStates)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local regenCharges = require(Shared.Utils.RegenCharges)
 local MovementValidationConstants = require(script.Parent.Parent.Constants.MovementValidationConstants)
+local PlayerVitalsService = require(script.Parent.PlayerVitalsService)
 
 local requestSprint = ReplicatedStorage.Remotes.RequestSprint :: RemoteEvent
+local requestSprintTechnique = ReplicatedStorage.Remotes.RequestSprintTechnique :: RemoteEvent
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent
 local requestAirDash = ReplicatedStorage.Remotes.RequestAirDash :: RemoteEvent
 local requestDoubleJump = ReplicatedStorage.Remotes.RequestDoubleJump :: RemoteEvent
@@ -20,12 +22,22 @@ local requestLedgeJump = ReplicatedStorage.Remotes.RequestLedgeJump :: RemoteEve
 local requestRollCancel = ReplicatedStorage.Remotes.RequestRollCancel :: RemoteEvent
 local requestSlide = ReplicatedStorage.Remotes.RequestSlide :: RemoteEvent
 local requestCrouch = ReplicatedStorage.Remotes.RequestCrouch :: RemoteEvent
+local requestWallRun = ReplicatedStorage.Remotes.RequestWallRun :: RemoteEvent
+local requestWallLeap = ReplicatedStorage.Remotes.RequestWallLeap :: RemoteEvent
+local requestWallCling = ReplicatedStorage.Remotes.RequestWallCling :: RemoteEvent
+local requestWallBoost = ReplicatedStorage.Remotes.RequestWallBoost :: RemoteEvent
+local requestWallClingDoubleJump = ReplicatedStorage.Remotes.RequestWallClingDoubleJump :: RemoteEvent
+local requestWallClimbLeap = ReplicatedStorage.Remotes.RequestWallClimbLeap :: RemoteEvent
 
 type PlayerMovementRecord = {
 	humanoid: Humanoid,
 	rootPart: BasePart,
 	lastSprintRequestTime: number,
 	isSprinting: boolean,
+	-- The Qinggong Sprinting technique's fully-ramped boundary (see SprintController) -- the ramp
+	-- itself (SprintCharging) never leaves Running's WalkSpeed tolerance, so only this needs its own
+	-- server-tracked flag.
+	isFullSprinting: boolean,
 	lastSlideRequestTime: number,
 	-- Sliding can run for a variable, physics-driven duration (decaying friction, re-accelerating
 	-- down a steep slope), unlike Dash's fixed duration -- so instead of a timed exemption window,
@@ -56,11 +68,39 @@ type PlayerMovementRecord = {
 	lastPosition: Vector3,
 	lastCheckTime: number,
 	speedViolationStreak: number,
+	-- Keyed by ability name (e.g. "WallRun") -- see MovementValidationConstants.MinAbilityRequestInterval.
+	lastAbilityRequestTime: { [string]: number },
 }
 
 local function isAirborne(humanoid: Humanoid): boolean
 	local state = humanoid:GetState()
 	return state == Enum.HumanoidStateType.Jumping or state == Enum.HumanoidStateType.Freefall
+end
+
+-- Coarse geometry sanity check for wall running/leaping: is there actually any collidable part
+-- near the player, mirroring the client's own wall raycast without trusting its claim. Projects
+-- the check origin forward along measured velocity for half the player's ping so replication lag
+-- doesn't cause false rejections.
+local function isNearWall(character: Model, player: Player): boolean
+	local rootPart = character:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not rootPart then
+		return false
+	end
+
+	local latency = math.min(player:GetNetworkPing() / 2, MovementValidationConstants.WallProximityLatencyCap)
+	local origin = rootPart.Position + (rootPart.AssemblyLinearVelocity * latency)
+
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	overlapParams.FilterDescendantsInstances = { character }
+
+	local nearbyParts = workspace:GetPartBoundsInRadius(origin, MovementValidationConstants.WallProximityCheckDistance, overlapParams)
+	for _, part in ipairs(nearbyParts) do
+		if part.CanCollide then
+			return true
+		end
+	end
+	return false
 end
 
 local function computeWalkSpeed(record: PlayerMovementRecord): number
@@ -69,6 +109,9 @@ local function computeWalkSpeed(record: PlayerMovementRecord): number
 	end
 	if record.isCrouching then
 		return MovementConstants.CrouchSpeed
+	end
+	if record.isFullSprinting then
+		return MovementConstants.SprintSpeed
 	end
 	return if record.isSprinting then MovementConstants.RunSpeed else MovementConstants.WalkSpeed
 end
@@ -101,6 +144,7 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		rootPart = rootPart,
 		lastSprintRequestTime = 0,
 		isSprinting = false,
+		isFullSprinting = false,
 		lastSlideRequestTime = 0,
 		isSliding = false,
 		lastCrouchRequestTime = 0,
@@ -117,7 +161,20 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		lastPosition = rootPart.Position,
 		lastCheckTime = os.clock(),
 		speedViolationStreak = 0,
+		lastAbilityRequestTime = {},
 	}
+end
+
+-- Shared floor for abilities with no cooldown/charge of their own -- see
+-- MovementValidationConstants.MinAbilityRequestInterval. Checked first, before any real per-request
+-- work (a physics query, a raycast), so spamming the remote can't multiply that cost.
+function MovementValidationService._throttleAbilityRequest(_self: MovementValidationService, record: PlayerMovementRecord, key: string): boolean
+	local now = os.clock()
+	if now - (record.lastAbilityRequestTime[key] or 0) < MovementValidationConstants.MinAbilityRequestInterval then
+		return false
+	end
+	record.lastAbilityRequestTime[key] = now
+	return true
 end
 
 function MovementValidationService._onRequestDash(self: MovementValidationService, player: Player, category: unknown)
@@ -162,6 +219,11 @@ function MovementValidationService._onRequestAirDash(self: MovementValidationSer
 		return
 	end
 
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostAirDash) then
+		warn(string.format("[Anti-Exploit] %s attempted an air dash with insufficient Qinggong.", player.Name))
+		return
+	end
+
 	record.lastAirDashTime = now
 	record.speedCheckExemptUntil = now + MovementConstants.AirDashDuration
 	record.pendingLandingSettleGrace = true
@@ -176,6 +238,10 @@ function MovementValidationService._onRequestDoubleJump(self: MovementValidation
 		return
 	end
 
+	if not self:_throttleAbilityRequest(record, "DoubleJump") then
+		return
+	end
+
 	if not isAirborne(record.humanoid) then
 		warn(string.format("[Anti-Exploit] %s attempted a double jump while grounded.", player.Name))
 		return
@@ -183,6 +249,11 @@ function MovementValidationService._onRequestDoubleJump(self: MovementValidation
 
 	if record.hasDoubleJumped then
 		warn(string.format("[Anti-Exploit] %s attempted multiple double jumps in one airborne cycle.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostDoubleJump) then
+		warn(string.format("[Anti-Exploit] %s attempted a double jump with insufficient Qinggong.", player.Name))
 		return
 	end
 
@@ -202,6 +273,10 @@ function MovementValidationService._onRequestLedgeJump(self: MovementValidationS
 		return
 	end
 
+	if not self:_throttleAbilityRequest(record, "LedgeJump") then
+		return
+	end
+
 	local rootPart = record.rootPart
 	local velocity = rootPart.AssemblyLinearVelocity
 	local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
@@ -215,6 +290,196 @@ function MovementValidationService._onRequestLedgeJump(self: MovementValidationS
 	local downRay = workspace:Raycast(origin, Vector3.new(0, -MovementConstants.LedgeJumpEdgeCheckDown, 0), rayParams)
 	if downRay then
 		warn(string.format("[Anti-Exploit] %s claimed a ledge jump with ground still ahead.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostLedgeJump) then
+		warn(string.format("[Anti-Exploit] %s attempted a ledge jump with insufficient Qinggong.", player.Name))
+		return
+	end
+
+	record.pendingLandingSettleGrace = true
+end
+
+-- Wall running holds the character airborne (off the ground, against a wall) for its entire
+-- variable duration, so the existing isAirborne bypass in _validatePlayer already fully exempts it
+-- from the speed check -- no exemption window needs granting here, just legality: actually
+-- airborne, and an actual wall nearby to run along instead of empty air.
+function MovementValidationService._onRequestWallRun(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallRun") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall run while grounded.", player.Name))
+		return
+	end
+
+	if not isNearWall(character, player) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall run with no wall nearby.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallRun) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall run with insufficient Qinggong.", player.Name))
+		return
+	end
+
+	-- The run's own WallRunSpeed carries into whatever happens right after it ends (a leap, or
+	-- falling into a landing) faster than WalkSpeed-based validation would allow -- same settle-time
+	-- reasoning as the other aerial actions, granted the moment landing is actually observed.
+	record.pendingLandingSettleGrace = true
+end
+
+-- A one-shot outward burst off the wall run, same legality shape as the run itself -- checked
+-- independently rather than trusting that a valid RequestWallRun necessarily preceded it.
+function MovementValidationService._onRequestWallLeap(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallLeap") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall leap while grounded.", player.Name))
+		return
+	end
+
+	if not isNearWall(character, player) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall leap with no wall nearby.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallLeap) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall leap with insufficient Qinggong.", player.Name))
+		return
+	end
+
+	record.pendingLandingSettleGrace = true
+end
+
+-- Grabbing a wall dead ahead holds the character airborne (off the ground, against a wall) for a
+-- variable duration, same isAirborne-exemption reasoning as wall running -- legality here is just
+-- "actually airborne" and "an actual wall nearby," not a speed-check exemption window.
+function MovementValidationService._onRequestWallCling(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallCling") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall cling while grounded.", player.Name))
+		return
+	end
+
+	if not isNearWall(character, player) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall cling with no wall nearby.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallCling) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall cling with insufficient Qinggong.", player.Name))
+		return
+	end
+
+	record.pendingLandingSettleGrace = true
+end
+
+-- A one-shot outward+upward burst off a wall cling, same legality shape as the leaps above --
+-- checked independently rather than trusting that a valid RequestWallCling necessarily preceded it.
+function MovementValidationService._onRequestWallBoost(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallBoost") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall boost while grounded.", player.Name))
+		return
+	end
+
+	if not isNearWall(character, player) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall boost with no wall nearby.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallBoost) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall boost with insufficient Qinggong.", player.Name))
+		return
+	end
+
+	record.pendingLandingSettleGrace = true
+end
+
+-- Only overwrites vertical velocity (see WallClingController), same shape as an ordinary double
+-- jump -- nothing here for the horizontal speed check to be tricked by, and no wall/chain gate at
+-- all since it's a generic mid-air recovery hop, not a wall-contact ability. Legality is entirely
+-- the client's own deadline window, enforced by the transition table.
+function MovementValidationService._onRequestWallClingDoubleJump(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallClingDoubleJump") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall cling double jump while grounded.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallClingDoubleJump) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall cling double jump with insufficient Qinggong.", player.Name))
+		return
+	end
+end
+
+-- WallHanging's own release move (a leap off the wall) -- same legality shape as WallBoost above.
+function MovementValidationService._onRequestWallClimbLeap(self: MovementValidationService, player: Player)
+	local record = self._records[player]
+	local character = player.Character
+	if not record or not character then
+		return
+	end
+
+	if not self:_throttleAbilityRequest(record, "WallClimbLeap") then
+		return
+	end
+
+	if not isAirborne(record.humanoid) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall climb leap while grounded.", player.Name))
+		return
+	end
+
+	if not isNearWall(character, player) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall climb leap with no wall nearby.", player.Name))
+		return
+	end
+
+	if not PlayerVitalsService:Spend(player, "Qinggong", MovementConstants.QinggongCostWallClimbLeap) then
+		warn(string.format("[Anti-Exploit] %s attempted a wall climb leap with insufficient Qinggong.", player.Name))
 		return
 	end
 
@@ -285,6 +550,31 @@ function MovementValidationService._onRequestSprint(self: MovementValidationServ
 
 	record.isSprinting = wantsToSprint
 	record.humanoid.WalkSpeed = computeWalkSpeed(record)
+end
+
+-- SprintController fires this only at the fully-ramped boundary (entering/leaving the Sprinting
+-- state) -- the ramp itself (SprintCharging) never leaves Running's WalkSpeed*SpeedTolerance
+-- allowance, so the server doesn't need to mirror the client's per-frame ramp, just raise its own
+-- WalkSpeed ceiling once the technique is actually complete.
+function MovementValidationService._onRequestSprintTechnique(self: MovementValidationService, player: Player, isFullSprinting: unknown)
+	if typeof(isFullSprinting) ~= "boolean" then
+		return
+	end
+
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	-- Deliberately free of any Qinggong cost/check -- sprinting stays available regardless of the
+	-- pool (see VitalsConstants.QinggongRegenDelay's own comment for how spam of the OTHER Qinggong
+	-- abilities is kept in check instead).
+	record.isFullSprinting = isFullSprinting
+	record.humanoid.WalkSpeed = computeWalkSpeed(record)
+	if isFullSprinting then
+		record.speedCheckExemptUntil =
+			math.max(record.speedCheckExemptUntil, os.clock() + MovementValidationConstants.FullSprintSettleGrace)
+	end
 end
 
 function MovementValidationService._onRequestSlide(self: MovementValidationService, player: Player, isSliding: unknown)
@@ -429,6 +719,10 @@ function MovementValidationService.Init(self: MovementValidationService)
 		self:_onRequestSprint(player, wantsToSprint)
 	end)
 
+	requestSprintTechnique.OnServerEvent:Connect(function(player: Player, isFullSprinting: unknown)
+		self:_onRequestSprintTechnique(player, isFullSprinting)
+	end)
+
 	requestDash.OnServerEvent:Connect(function(player: Player, category: unknown)
 		self:_onRequestDash(player, category)
 	end)
@@ -455,6 +749,30 @@ function MovementValidationService.Init(self: MovementValidationService)
 
 	requestCrouch.OnServerEvent:Connect(function(player: Player, isCrouching: unknown)
 		self:_onRequestCrouch(player, isCrouching)
+	end)
+
+	requestWallRun.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallRun(player)
+	end)
+
+	requestWallLeap.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallLeap(player)
+	end)
+
+	requestWallCling.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallCling(player)
+	end)
+
+	requestWallBoost.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallBoost(player)
+	end)
+
+	requestWallClingDoubleJump.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallClingDoubleJump(player)
+	end)
+
+	requestWallClimbLeap.OnServerEvent:Connect(function(player: Player)
+		self:_onRequestWallClimbLeap(player)
 	end)
 
 	local nextValidationTime = 0

@@ -6,6 +6,16 @@ local MovementValidationConstants = table.freeze({
 	CrouchRequestCooldown = 0.1,
 	ValidationTickRate = 1 / 15,
 
+	-- Floor on how often any single ability request is even considered per player, independent of
+	-- that ability's own legality/charge rules -- DoubleJump/LedgeJump/WallRun/WallLeap/WallCling/
+	-- WallBoost/WallClingDoubleJump/WallClimbLeap have no cooldown of their own (Dash/AirDash/Sprint/
+	-- Slide/Crouch/RollCancel already do), so with many players on one server a client spamming one
+	-- of those remotes would otherwise re-run its full check -- including a physics query
+	-- (isNearWall) or raycast (ledge jump) -- as fast as it can fire the remote. This is a single
+	-- cheap table lookup checked before any of that real work happens, not gameplay-facing (no
+	-- legitimate input device fires the same ability faster than 20/sec).
+	MinAbilityRequestInterval = 0.05,
+
 	-- A roll cancel ends the dash's speed exemption early, while real speed is still well above
 	-- WalkSpeed. That residual velocity doesn't simply stick -- Humanoid's own ground controller
 	-- keeps independently driving velocity off WalkSpeed/MoveDirection every physics step, so the
@@ -16,6 +26,14 @@ local MovementValidationConstants = table.freeze({
 
 	SpeedViolationStreakThreshold = 3, -- absorbs the network-latency race before RequestDash's exemption lands
 	CrouchSpeedSettleGrace = 0.2, -- lets residual pre-crouch velocity decay to CrouchSpeed before checks resume
+	FullSprintSettleGrace = 0.2, -- same idea, for the Qinggong Sprinting technique's WalkSpeed jump
+
+	-- Radius for the wall-run/wall-leap proximity sanity check (isNearWall below) -- generous on
+	-- purpose (this is a coarse backstop against claiming either with no wall at all, not precision
+	-- anti-cheat) since the server's own snapshot of the character can already be a few studs behind
+	-- the client's by the time this validates, on top of the latency-projection term below.
+	WallProximityCheckDistance = 16,
+	WallProximityLatencyCap = 2,
 
 	-- An air dash or ledge jump is a one-shot impulse with no braking, unlike the ground dash --
 	-- residual velocity keeps carrying the player until they actually land, at an unpredictable time

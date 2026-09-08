@@ -12,6 +12,7 @@ local sampleSurfaceColor = require(Shared.Utils.SampleSurfaceColor)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local FootstepSounds = require(script.Parent.Parent.Audio.FootstepSounds)
 local MovementVFXTemplates = require(script.Parent.Parent.VFX.MovementVFXTemplates)
+local SprintController = require(script.Parent.SprintController)
 
 local notifyFootstep = ReplicatedStorage.Remotes.NotifyFootstep :: UnreliableRemoteEvent
 local playFootstepSFX = ReplicatedStorage.Remotes.PlayFootstepSFX :: UnreliableRemoteEvent
@@ -66,10 +67,14 @@ function FootstepController.new(): FootstepController
 	return self
 end
 
-function FootstepController._playFootstepSound(self: FootstepController, rootPart: BasePart, materialName: string)
+-- volumeMultiplier defaults to full volume -- only the local player's own steps (see
+-- _processFootstep) fade this with the Qinggong Sprinting technique's charge; a remote player's
+-- footsteps have no visibility into that player's own sprint state, so they're left untouched.
+function FootstepController._playFootstepSound(self: FootstepController, rootPart: BasePart, materialName: string, volumeMultiplier: number?)
 	local sound = Instance.new("Sound")
 	sound.SoundId = FootstepSounds.GetRandomSound(materialName)
 	sound.PlaybackSpeed = 1 + ((math.random() * 2 - 1) * FootstepConstants.PitchVariance)
+	sound.Volume = FootstepConstants.BaseVolume * (volumeMultiplier or 1)
 	sound.Parent = rootPart
 	sound:Play()
 
@@ -118,7 +123,11 @@ function FootstepController._processFootstep(self: FootstepController, humanoid:
 	local rayResult = workspace:Raycast(rootPart.Position, DOWN * FootstepConstants.GroundCheckDistance, self._rayParams)
 	local materialName = if rayResult then rayResult.Material.Name else "Plastic"
 
-	self:_playFootstepSound(rootPart, materialName)
+	-- Crossfades with the Sprint wind SFX ramping in the opposite direction (see
+	-- MovementSoundController) instead of playing at full volume until SprintCharging's interval
+	-- above stops firing at all once Sprinting is reached.
+	local volumeMultiplier = 1 - SprintController:GetSprintTarget()
+	self:_playFootstepSound(rootPart, materialName, volumeMultiplier)
 	self:_spawnFootstepVFX(rootPart, self._currentLeg, sampleSurfaceColor(rayResult))
 	self._currentLeg = if self._currentLeg == 1 then 2 else 1
 

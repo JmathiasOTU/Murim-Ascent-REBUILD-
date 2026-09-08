@@ -17,6 +17,9 @@ local QinggongAnimations = require(script.Parent.Parent.Animation.QinggongAnimat
 local DirectionalWalkAnimations = require(script.Parent.Parent.Animation.DirectionalWalkAnimations)
 local DashAnimations = require(script.Parent.Parent.Animation.DashAnimations)
 local DodgeCancelAnimations = require(script.Parent.Parent.Animation.DodgeCancelAnimations)
+local WallRunAnimations = require(script.Parent.Parent.Animation.WallRunAnimations)
+local WallClimbAnimations = require(script.Parent.Parent.Animation.WallClimbAnimations)
+local SprintAnimation = require(script.Parent.Parent.Animation.SprintAnimation)
 
 local player = Players.LocalPlayer
 
@@ -33,6 +36,11 @@ export type AnimationController = typeof(setmetatable(
 		_activeDashTrack: AnimationTrack?,
 		_dodgeCancelTracks: { [string]: AnimationTrack },
 		_activeDodgeCancelTrack: AnimationTrack?,
+		_wallRunTracks: { [string]: AnimationTrack },
+		_activeWallRunTrack: AnimationTrack?,
+		_wallClimbTracks: { [string]: AnimationTrack },
+		_activeWallClimbTrack: AnimationTrack?,
+		_rayParams: RaycastParams?,
 	},
 	AnimationController
 ))
@@ -47,6 +55,11 @@ function AnimationController.new(): AnimationController
 		_activeDashTrack = nil,
 		_dodgeCancelTracks = {},
 		_activeDodgeCancelTrack = nil,
+		_wallRunTracks = {},
+		_activeWallRunTrack = nil,
+		_wallClimbTracks = {},
+		_activeWallClimbTrack = nil,
+		_rayParams = nil,
 	}, AnimationController)
 
 	return self
@@ -76,6 +89,14 @@ function AnimationController._setupCharacter(self: AnimationController, characte
 		track.Priority = Enum.AnimationPriority.Action
 		tracks[state] = track
 	end
+
+	-- Loaded directly into the generic table (not QinggongAnimations, which forces one-shot/Action
+	-- above) since this is a sustained loop, same treatment as WallHanging's own loop.
+	local sprintTrack = animator:LoadAnimation(SprintAnimation)
+	sprintTrack.Looped = true
+	sprintTrack.Priority = Enum.AnimationPriority.Movement
+	tracks[MovementState.Sprinting] = sprintTrack
+
 	self._tracks = tracks
 
 	local walkTracks: { [string]: AnimationTrack } = {}
@@ -104,6 +125,34 @@ function AnimationController._setupCharacter(self: AnimationController, characte
 	end
 	self._dodgeCancelTracks = dodgeCancelTracks
 	self._activeDodgeCancelTrack = nil
+
+	local wallRunTracks: { [string]: AnimationTrack } = {}
+	for name, animation in pairs(WallRunAnimations) do
+		local track = animator:LoadAnimation(animation)
+		local isLeap = name == "WallLeapLeft" or name == "WallLeapRight"
+		track.Looped = not isLeap
+		track.Priority = if isLeap then Enum.AnimationPriority.Action else Enum.AnimationPriority.Movement
+		wallRunTracks[name] = track
+	end
+	self._wallRunTracks = wallRunTracks
+	self._activeWallRunTrack = nil
+
+	local wallClimbTracks: { [string]: AnimationTrack } = {}
+	for name, animation in pairs(WallClimbAnimations) do
+		local track = animator:LoadAnimation(animation)
+		-- WallHanging is the sustained cling pose -- everything else here (WallBoost,
+		-- WallClingDoubleJump, and WallLatch layered on top of the hang) is a one-shot.
+		track.Looped = name == MovementState.WallHanging
+		track.Priority = Enum.AnimationPriority.Movement
+		wallClimbTracks[name] = track
+	end
+	self._wallClimbTracks = wallClimbTracks
+	self._activeWallClimbTrack = nil
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Exclude
+	rayParams.FilterDescendantsInstances = { character }
+	self._rayParams = rayParams
 
 	local currentTrack = tracks[movementFSM:GetState()]
 	if currentTrack then
@@ -210,13 +259,150 @@ function AnimationController._exitDodgeCancelling(self: AnimationController)
 	end
 end
 
+-- Which side the wall is actually on -- same side-raycast shape WallRunController itself checks,
+-- read independently here purely to pick the mirrored clip.
+function AnimationController._sideRaycastHitsRight(self: AnimationController, rootPart: BasePart, rayLength: number): boolean
+	local rightRay = workspace:Raycast(rootPart.Position, rootPart.CFrame.RightVector * rayLength, self._rayParams)
+	return rightRay ~= nil
+end
+
+function AnimationController._enterWallRunning(self: AnimationController)
+	local humanoid, rootPart = getHumanoidAndRoot(player.Character)
+	if not humanoid or not rootPart then
+		return
+	end
+
+	local isRight = self:_sideRaycastHitsRight(rootPart, MovementConstants.WallSideRayDistance)
+	local track = self._wallRunTracks[if isRight then "WallRunRight" else "WallRunLeft"]
+	if not track then
+		return
+	end
+
+	track:Play(AnimationConstants.DashFadeInTime)
+	self._activeWallRunTrack = track
+end
+
+function AnimationController._enterWallLeaping(self: AnimationController)
+	local humanoid, rootPart = getHumanoidAndRoot(player.Character)
+	if not humanoid or not rootPart then
+		return
+	end
+
+	local isRight = self:_sideRaycastHitsRight(rootPart, MovementConstants.WallLeapRayLength)
+	local track = self._wallRunTracks[if isRight then "WallLeapRight" else "WallLeapLeft"]
+	if not track then
+		return
+	end
+
+	track:Play(AnimationConstants.DashFadeInTime)
+	self._activeWallRunTrack = track
+end
+
+function AnimationController._exitWallRunOrLeap(self: AnimationController)
+	if self._activeWallRunTrack then
+		self._activeWallRunTrack:Stop(AnimationConstants.DashFadeOutTime)
+		self._activeWallRunTrack = nil
+	end
+end
+
+-- WallLatch is a one-shot impact layered on top of the sustained WallHanging loop at the moment of
+-- latching on, both playing simultaneously on the same Animator.
+function AnimationController._enterWallHanging(self: AnimationController)
+	local hangTrack = self._wallClimbTracks[MovementState.WallHanging]
+	if hangTrack then
+		hangTrack:Play(AnimationConstants.FadeTime)
+	end
+
+	local latchTrack = self._wallClimbTracks.WallLatch
+	if latchTrack then
+		latchTrack:Play(AnimationConstants.DashFadeInTime)
+	end
+end
+
+function AnimationController._exitWallHanging(self: AnimationController)
+	local hangTrack = self._wallClimbTracks[MovementState.WallHanging]
+	if hangTrack then
+		hangTrack:Stop(AnimationConstants.FadeTime)
+	end
+
+	-- Stopped defensively in case it's somehow still playing (safe no-op otherwise, since it's a
+	-- short one-shot that normally finishes on its own).
+	local latchTrack = self._wallClimbTracks.WallLatch
+	if latchTrack then
+		latchTrack:Stop(AnimationConstants.FadeTime)
+	end
+end
+
+function AnimationController._enterWallBoost(self: AnimationController)
+	local track = self._wallClimbTracks[MovementState.WallBoost]
+	if not track then
+		return
+	end
+
+	track:Play(AnimationConstants.DashFadeInTime)
+	self._activeWallClimbTrack = track
+end
+
+function AnimationController._enterWallClingDoubleJump(self: AnimationController)
+	local track = self._wallClimbTracks[MovementState.WallClingDoubleJump]
+	if not track then
+		return
+	end
+
+	track:Play(AnimationConstants.DashFadeInTime)
+	self._activeWallClimbTrack = track
+end
+
+-- No dedicated leap-off clip exists for this -- reuses WallBoost's push-off-the-wall pose, the
+-- closest visual match on hand.
+function AnimationController._enterWallClimbLeaping(self: AnimationController)
+	local track = self._wallClimbTracks[MovementState.WallBoost]
+	if not track then
+		return
+	end
+
+	track:Play(AnimationConstants.DashFadeInTime)
+	self._activeWallClimbTrack = track
+end
+
+function AnimationController._exitWallClimbAction(self: AnimationController)
+	if self._activeWallClimbTrack then
+		self._activeWallClimbTrack:Stop(AnimationConstants.DashFadeOutTime)
+		self._activeWallClimbTrack = nil
+	end
+end
+
 function AnimationController._onMovementStateChanged(self: AnimationController, newState: string, oldState: string)
+	-- The Qinggong Sprinting technique's hold-gate (see SprintController) starts the moment Running
+	-- has already been playing for a while -- nothing should visibly change yet, so Running's track
+	-- is deliberately left running through the whole charge instead of being stopped/restarted here.
+	if oldState == MovementState.Running and newState == MovementState.SprintCharging then
+		return
+	end
+
 	if oldState == MovementState.Walking then
 		self:_exitWalking()
 	elseif MovementConstants.DashingStates[oldState] then
 		self:_exitDashing()
 	elseif oldState == MovementState.DodgeCancelling then
 		self:_exitDodgeCancelling()
+	elseif oldState == MovementState.WallRunning or oldState == MovementState.WallLeaping then
+		self:_exitWallRunOrLeap()
+	elseif oldState == MovementState.WallHanging then
+		self:_exitWallHanging()
+	elseif oldState == MovementState.SprintCharging then
+		-- Leaving the charge for any reason (completed into Sprinting, or interrupted early by a
+		-- jump/slide/etc.) -- the Running track kept alive above finally gets stopped here, exactly
+		-- once, regardless of which of those it was.
+		local runningTrack = self._tracks[MovementState.Running]
+		if runningTrack then
+			runningTrack:Stop(AnimationConstants.FadeTime)
+		end
+	elseif oldState == MovementState.WallBoost
+		or oldState == MovementState.WallClingDoubleJump
+		or oldState == MovementState.WallClimbLeaping
+	then
+		self:_exitWallClimbAction()
 	elseif MovementConstants.QinggongAnimationStates[oldState] then
 		-- LedgeJumping isn't a QinggongActionState -- it hands off to Falling the instant the jump
 		-- arc naturally does, same as an ordinary jump, and that's correct. But the one-shot launch
@@ -242,6 +428,18 @@ function AnimationController._onMovementStateChanged(self: AnimationController, 
 		self:_enterDashing()
 	elseif newState == MovementState.DodgeCancelling then
 		self:_enterDodgeCancelling()
+	elseif newState == MovementState.WallRunning then
+		self:_enterWallRunning()
+	elseif newState == MovementState.WallLeaping then
+		self:_enterWallLeaping()
+	elseif newState == MovementState.WallHanging then
+		self:_enterWallHanging()
+	elseif newState == MovementState.WallBoost then
+		self:_enterWallBoost()
+	elseif newState == MovementState.WallClingDoubleJump then
+		self:_enterWallClingDoubleJump()
+	elseif newState == MovementState.WallClimbLeaping then
+		self:_enterWallClimbLeaping()
 	elseif MovementConstants.QinggongAnimationStates[newState] then
 		local newTrack = self._tracks[newState]
 		if newTrack then

@@ -18,6 +18,10 @@ local player = Players.LocalPlayer
 local LIMBS = { "Right Arm", "Left Arm", "Right Leg", "Left Leg" }
 local FOOT_DUST_OFFSET = CFrame.new(0, -2, 0)
 local DOUBLE_JUMP_VFX_OFFSET = CFrame.new(0, -2.5, 0)
+-- R6 limbs are ~2 studs tall, origin at the vertical center -- this reaches down toward the
+-- hand/foot end rather than the shoulder/hip end.
+local WALL_CLING_DUST_LIMB_OFFSET = CFrame.new(0, -1, 0)
+local SPRINT_VFX_OFFSET = CFrame.new(0, 0, -4)
 local GROUND_CHECK_DISTANCE = 5
 local DOWN = Vector3.new(0, -1, 0)
 local BURST_VFX_EMIT_COUNT = 15
@@ -33,6 +37,8 @@ export type MovementVFXController = typeof(setmetatable(
 		_activeDashDust: BasePart?,
 		_activeSlideDust: BasePart?,
 		_activeDoubleJumpTrailParts: { Instance },
+		_activeWallClingDustParts: { Instance },
+		_activeSprintVFX: BasePart?,
 		_rayParams: RaycastParams?,
 	},
 	MovementVFXController
@@ -59,6 +65,8 @@ function MovementVFXController.new(): MovementVFXController
 		_activeDashDust = nil,
 		_activeSlideDust = nil,
 		_activeDoubleJumpTrailParts = {},
+		_activeWallClingDustParts = {},
+		_activeSprintVFX = nil,
 		_rayParams = nil,
 	}, MovementVFXController)
 
@@ -121,6 +129,94 @@ function MovementVFXController._stopDoubleJumpTrail(self: MovementVFXController)
 	destroyAll(self._activeDoubleJumpTrailParts)
 end
 
+-- Sampled off the wall actually being gripped (forward from the root part, same ray shape
+-- WallClingController's own cling check uses) rather than the ground -- there isn't one underfoot
+-- while hanging.
+function MovementVFXController._sampleWallColor(self: MovementVFXController, rootPart: BasePart): Color3
+	local rayResult = workspace:Raycast(
+		rootPart.Position,
+		rootPart.CFrame.LookVector * MovementConstants.WallClingDetectionRange,
+		self._rayParams
+	)
+	return sampleSurfaceColor(rayResult)
+end
+
+-- Welds MovementDust to all four limbs for as long as WallHanging lasts -- the same asset the foot
+-- dust above uses, just continuous instead of a one-shot burst, and tinted off the gripped wall
+-- (sampled once for the whole cling) instead of the ground.
+function MovementVFXController._startWallClingDust(self: MovementVFXController, character: Model, rootPart: BasePart)
+	if #self._activeWallClingDustParts > 0 then
+		return
+	end
+
+	local template = QinggongVFXTemplates.MovementDust
+	local dustColor = ColorSequence.new(self:_sampleWallColor(rootPart))
+
+	for _, limbName in ipairs(LIMBS) do
+		local limb = character:FindFirstChild(limbName)
+		if not limb then
+			continue
+		end
+
+		local dustPart = template:Clone()
+		dustPart.Anchored = false
+		dustPart.CanCollide = false
+		dustPart.CanQuery = false
+		dustPart.Massless = true
+		dustPart.CFrame = (limb :: BasePart).CFrame * WALL_CLING_DUST_LIMB_OFFSET
+		dustPart.Parent = limb
+
+		for _, descendant in ipairs(dustPart:GetDescendants()) do
+			if descendant:IsA("ParticleEmitter") then
+				descendant.Color = dustColor
+			end
+		end
+
+		local weld = Instance.new("Weld")
+		weld.Part0 = limb :: BasePart
+		weld.Part1 = dustPart
+		weld.C0 = WALL_CLING_DUST_LIMB_OFFSET
+		weld.Parent = dustPart
+
+		table.insert(self._activeWallClingDustParts, dustPart)
+	end
+end
+
+function MovementVFXController._stopWallClingDust(self: MovementVFXController)
+	destroyAll(self._activeWallClingDustParts)
+end
+
+-- Welded behind the HRP for as long as the Qinggong Sprinting technique is fully active (see
+-- SprintController) -- a continuous wind trail, unlike the one-shot bursts above.
+function MovementVFXController._startSprintVFX(self: MovementVFXController, rootPart: BasePart)
+	if self._activeSprintVFX then
+		return
+	end
+
+	local vfxPart = QinggongVFXTemplates.SprintVFX:Clone()
+	vfxPart.Anchored = false
+	vfxPart.CanCollide = false
+	vfxPart.CanQuery = false
+	vfxPart.Massless = true
+	vfxPart.CFrame = rootPart.CFrame * SPRINT_VFX_OFFSET
+	vfxPart.Parent = rootPart
+
+	local weld = Instance.new("Weld")
+	weld.Part0 = rootPart
+	weld.Part1 = vfxPart
+	weld.C0 = SPRINT_VFX_OFFSET
+	weld.Parent = vfxPart
+
+	self._activeSprintVFX = vfxPart
+end
+
+function MovementVFXController._stopSprintVFX(self: MovementVFXController)
+	if self._activeSprintVFX then
+		self._activeSprintVFX:Destroy()
+		self._activeSprintVFX = nil
+	end
+end
+
 -- One-shot burst left exactly where it's spawned (not welded to the character) -- used for the
 -- Qinggong actions, which mark the spot they were activated from rather than following the
 -- character as it moves away.
@@ -175,6 +271,8 @@ end
 function MovementVFXController._stopAllVFX(self: MovementVFXController)
 	self:_stopDashTrail()
 	self:_stopDoubleJumpTrail()
+	self:_stopWallClingDust()
+	self:_stopSprintVFX()
 
 	if self._activeDashDust then
 		self._activeDashDust:Destroy()
@@ -220,6 +318,21 @@ function MovementVFXController._onMovementStateChanged(self: MovementVFXControll
 		spawnBurstVFX(rootPart.CFrame, QinggongVFXTemplates.AirDashVFX)
 	elseif newState == MovementState.LedgeJumping then
 		spawnBurstVFX(rootPart.CFrame, QinggongVFXTemplates.LedgeJumpVFX)
+	elseif newState == MovementState.WallLeaping or newState == MovementState.WallClimbLeaping then
+		-- Same burst prefab as WallRunning's own leap -- only the SFX differs between the two flavors.
+		spawnBurstVFX(rootPart.CFrame, QinggongVFXTemplates.WallLeapVfx)
+	end
+
+	if newState == MovementState.WallHanging then
+		self:_startWallClingDust(character, rootPart)
+	elseif oldState == MovementState.WallHanging then
+		self:_stopWallClingDust()
+	end
+
+	if newState == MovementState.Sprinting then
+		self:_startSprintVFX(rootPart)
+	elseif not MovementConstants.SprintCarryStates[newState] then
+		self:_stopSprintVFX()
 	end
 end
 

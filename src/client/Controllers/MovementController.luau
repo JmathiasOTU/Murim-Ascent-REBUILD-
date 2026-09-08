@@ -23,8 +23,10 @@ export type MovementController = typeof(setmetatable(
 	{} :: {
 		_connections: { RBXScriptConnection },
 		_isSprintKeyHeld: boolean,
+		_lastForwardKeyDownTime: number,
 		_updateMovementState: (() -> ())?,
 		_tryUpdateMovementState: (() -> ())?,
+		_sprintQuery: (() -> boolean)?,
 	},
 	MovementController
 ))
@@ -40,8 +42,10 @@ function MovementController.new(): MovementController
 	local self = setmetatable({
 		_connections = {},
 		_isSprintKeyHeld = false,
+		_lastForwardKeyDownTime = -math.huge,
 		_updateMovementState = nil,
 		_tryUpdateMovementState = nil,
+		_sprintQuery = nil,
 	}, MovementController)
 
 	return self
@@ -56,14 +60,19 @@ function MovementController._setupCharacter(self: MovementController, character:
 	local function updateMovementState()
 		local isMoving = humanoid.MoveDirection.Magnitude > 0
 		local isSprinting = isMoving and self._isSprintKeyHeld
+		local isQinggongSprintActive = isSprinting and self._sprintQuery ~= nil and (self._sprintQuery :: () -> boolean)()
 
-		local newState = if isSprinting
-			then MovementState.Running
+		local newState = if isQinggongSprintActive
+			then MovementState.Sprinting
+			elseif isSprinting then MovementState.Running
 			elseif isMoving then MovementState.Walking
 			else MovementState.Idle
 
 		movementFSM:TransitionTo(newState)
-		humanoid.WalkSpeed = if isSprinting then MovementConstants.RunSpeed else MovementConstants.WalkSpeed
+		humanoid.WalkSpeed = if isQinggongSprintActive
+			then MovementConstants.SprintSpeed
+			elseif isSprinting then MovementConstants.RunSpeed
+			else MovementConstants.WalkSpeed
 	end
 	self._updateMovementState = updateMovementState
 
@@ -97,6 +106,15 @@ function MovementController._setupCharacter(self: MovementController, character:
 	table.insert(
 		self._connections,
 		RunService.Heartbeat:Connect(function()
+			-- WallRunController's AlignOrientation constraint owns facing while wall-running (the
+			-- run direction follows the wall's tangent, not the camera) -- writing rootPart.CFrame
+			-- here at the same time would fight it every frame. WallClingController similarly locks
+			-- rotation (AutoRotate off) while hanging, snapped to face into the gripped wall.
+			local currentWallState = movementFSM:GetState()
+			if currentWallState == MovementState.WallRunning or currentWallState == MovementState.WallHanging then
+				return
+			end
+
 			local isShiftLocked = UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
 			local isMoving = humanoid.MoveDirection.Magnitude > 0
 			local shouldFaceCamera = isShiftLocked or isMoving
@@ -149,6 +167,18 @@ function MovementController.RefreshMovementState(self: MovementController)
 	end
 end
 
+-- Read by SprintController to know whether Running's own hold key is still down -- despite the
+-- name, this is the double-tap-W run toggle above, not the Qinggong Sprinting technique itself.
+function MovementController.IsSprintKeyHeld(self: MovementController): boolean
+	return self._isSprintKeyHeld
+end
+
+-- SprintController calls this once at Init to hook into updateMovementState's resolution above,
+-- without this module requiring SprintController back (avoids a require cycle).
+function MovementController.SetSprintQuery(self: MovementController, query: () -> boolean)
+	self._sprintQuery = query
+end
+
 function MovementController.Init(self: MovementController)
 	onCharacterAdded(player, function(character: Model)
 		self:_setupCharacter(character)
@@ -159,13 +189,19 @@ function MovementController.Init(self: MovementController)
 			return
 		end
 
-		if input.KeyCode == MovementConstants.SprintKey then
-			self:_setSprintKeyHeld(true)
+		if input.KeyCode == MovementConstants.SprintForwardKey then
+			local now = os.clock()
+			-- Second W press landing within the window while sprint isn't already
+			-- active is what triggers it; holding W down otherwise just walks.
+			if not self._isSprintKeyHeld and now - self._lastForwardKeyDownTime <= MovementConstants.SprintDoubleTapWindow then
+				self:_setSprintKeyHeld(true)
+			end
+			self._lastForwardKeyDownTime = now
 		end
 	end)
 
 	UserInputService.InputEnded:Connect(function(input: InputObject)
-		if input.KeyCode == MovementConstants.SprintKey then
+		if input.KeyCode == MovementConstants.SprintForwardKey then
 			self:_setSprintKeyHeld(false)
 		end
 	end)

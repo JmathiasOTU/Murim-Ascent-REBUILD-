@@ -8,8 +8,10 @@ local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
+local hasEnoughQinggong = require(Shared.Utils.HasEnoughQinggong)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local MovementController = require(script.Parent.MovementController)
+local WallRunController = require(script.Parent.WallRunController)
 
 local requestDoubleJump = ReplicatedStorage.Remotes.RequestDoubleJump :: RemoteEvent
 
@@ -67,6 +69,18 @@ function DoubleJumpController._tryDoubleJump(self: DoubleJumpController, humanoi
 	if self._hasDoubleJumped then
 		return
 	end
+
+	if not hasEnoughQinggong(MovementConstants.QinggongCostDoubleJump) then
+		return
+	end
+
+	-- Same Space press can also trigger a wall run (see WallRunController.Init) -- prefer that over
+	-- spending the double jump charge whenever the geometry actually supports one, rather than
+	-- relying solely on which controller's InputBegan connection happens to run first.
+	if WallRunController:CanStartWallRun(humanoid, rootPart) then
+		return
+	end
+
 	self._hasDoubleJumped = true
 
 	movementFSM:TransitionTo(MovementState.DoubleJumping)

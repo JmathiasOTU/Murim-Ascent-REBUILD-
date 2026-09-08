@@ -11,6 +11,7 @@ local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local movementFSM = require(script.Parent.Parent.State.MovementFSM)
 local MovementController = require(script.Parent.MovementController)
+local SprintController = require(script.Parent.SprintController)
 
 local requestSlide = ReplicatedStorage.Remotes.RequestSlide :: RemoteEvent
 
@@ -99,6 +100,12 @@ function SlideController._beginSlide(self: SlideController, rootPart: BasePart)
 	local speed = if currentMomentum.Magnitude > 0
 		then currentMomentum.Magnitude * MovementConstants.SlideBoostMultiplier
 		else MovementConstants.WalkSpeed * MovementConstants.SlideBoostMultiplier
+
+	-- Qinggong Sprinting empowers this slide -- checked once here at entry, same "locked in at the
+	-- moment of activation" shape as every other sprint-boosted ability.
+	if SprintController:IsSprintActive() then
+		speed *= MovementConstants.SprintSlideSpeedMultiplier
+	end
 
 	-- Primed true so the very first non-steep tick (e.g. starting a slide on flat ground) still
 	-- computes a real decay rate below, instead of leaving decelPerSecond at its default of 0 and
@@ -191,7 +198,11 @@ function SlideController._beginSlide(self: SlideController, rootPart: BasePart)
 end
 
 function SlideController._tryStartSlide(self: SlideController)
-	if movementFSM:GetState() ~= MovementState.Running then
+	local currentState = movementFSM:GetState()
+	if currentState ~= MovementState.Running
+		and currentState ~= MovementState.SprintCharging
+		and currentState ~= MovementState.Sprinting
+	then
 		return
 	end
 
