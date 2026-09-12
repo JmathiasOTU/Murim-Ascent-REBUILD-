@@ -92,6 +92,13 @@ type PlayerMovementRecord = {
 	-- HitRegistrationService via IsDashing, injected from ServiceBootstrap.
 	isDashing: boolean,
 	dashEndThread: thread?,
+	-- Deliberately separate from speedCheckExemptUntil below, even though both are set alongside each
+	-- other in _onRequestDash -- speedCheckExemptUntil is an anti-speed-hack allowance that a roll
+	-- cancel deliberately EXTENDS (DashCancelExemptionGrace, to absorb a measured physics transient --
+	-- see _onRequestRollCancel), while this is "is the player currently dodging" for combat purposes
+	-- and must end the instant Dashing ends early. Reusing one field for both would hand out bonus
+	-- i-frames during that settle window that were never supposed to exist.
+	dashInvulnerableUntil: number,
 	-- While now < this, _validatePlayer checks against speedCheckExemptBaseSpeed instead of
 	-- humanoid.WalkSpeed -- covers a dash's own velocity burst, and any other transient (e.g. residual
 	-- walking momentum not yet decayed to a just-lowered WalkSpeed) too fast for WalkSpeed-based
@@ -314,6 +321,7 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		lastAirDashTime = -math.huge,
 		isDashing = false,
 		dashEndThread = nil,
+		dashInvulnerableUntil = -math.huge,
 		speedCheckExemptUntil = 0,
 		-- Never actually read while speedCheckExemptUntil is 0 (now < 0 is never true) -- WalkSpeed is
 		-- just a sane placeholder rather than leaving it at a meaningless 0.
@@ -367,6 +375,7 @@ function MovementValidationService._onRequestDash(self: MovementValidationServic
 	-- the duration, so it's the correct ceiling rather than a full bypass.
 	record.speedCheckExemptBaseSpeed = MovementConstants.DashPower
 	record.speedCheckExemptReason = SpeedExemptReason.Dash
+	record.dashInvulnerableUntil = now + MovementConstants.DashDuration
 
 	-- Doubles as the combat Dodge (Combat_Framework_Design_Doc Section 3) -- IsDashing below.
 	record.isDashing = true
@@ -384,6 +393,27 @@ end
 function MovementValidationService.IsDashing(self: MovementValidationService, player: Player): boolean
 	local record = self._records[player]
 	return record ~= nil and record.isDashing
+end
+
+-- Queried by CombatValidationService for the Running Attack's server-side legality check
+-- (Combat_Framework_Design_Doc Section 4).
+function MovementValidationService.IsSprinting(self: MovementValidationService, player: Player): boolean
+	local record = self._records[player]
+	if not record or not player.Character then
+		return false
+	end
+	return record.isSprinting
+end
+
+-- Queried by HitRegistrationService for dodge-negation and by LagCompensationService for per-tick
+-- invulnerability sampling (Combat_Framework_Design_Doc Section 6). Deliberately its own field, not
+-- IsDashing -- see dashInvulnerableUntil's own comment for why the two must stay independent.
+function MovementValidationService.IsDashInvulnerable(self: MovementValidationService, player: Player): boolean
+	local record = self._records[player]
+	if not record or not player.Character then
+		return false
+	end
+	return os.clock() < record.dashInvulnerableUntil
 end
 
 -- Airborne movement is already fully exempt from the speed check (see isAirborne in
@@ -767,10 +797,11 @@ function MovementValidationService._onRequestRollCancel(self: MovementValidation
 	end
 	record.rollCancelCharges -= 1
 
-	-- Ends the dash's dodge-invulnerability window (isDashing) right now rather than letting it
-	-- linger until the original DashDuration would have elapsed -- a roll cancel is a genuine early
-	-- exit from the dash, not just a speed-check technicality.
+	-- Ends the dash's dodge-invulnerability window (isDashing, dashInvulnerableUntil) right now rather
+	-- than letting it linger until the original DashDuration would have elapsed -- a roll cancel is a
+	-- genuine early exit from the dash, not just a speed-check technicality.
 	record.isDashing = false
+	record.dashInvulnerableUntil = now
 	if record.dashEndThread then
 		task.cancel(record.dashEndThread)
 		record.dashEndThread = nil
