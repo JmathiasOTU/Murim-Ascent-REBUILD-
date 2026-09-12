@@ -10,9 +10,9 @@ local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local CameraConstants = require(Shared.Constants.CameraConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local SprintController = require(script.Parent.SprintController)
-local WallRunController = require(script.Parent.WallRunController)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local SprintController = require(script.Parent.Parent.Movement.SprintController)
+local WallRunController = require(script.Parent.Parent.Qinggong.WallRunController)
 
 local player = Players.LocalPlayer
 

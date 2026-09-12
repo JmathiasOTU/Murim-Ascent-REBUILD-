@@ -14,7 +14,7 @@ local newDashCooldownStates = require(Shared.Utils.NewDashCooldownStates)
 local DashCategoryMovementStates = require(Shared.Utils.DashCategoryMovementStates)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local regenCharges = require(Shared.Utils.RegenCharges)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
 local MovementController = require(script.Parent.MovementController)
 
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent

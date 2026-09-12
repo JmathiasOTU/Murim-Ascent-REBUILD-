@@ -10,9 +10,9 @@ local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local hasEnoughQinggong = require(Shared.Utils.HasEnoughQinggong)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local MovementController = require(script.Parent.MovementController)
-local SprintController = require(script.Parent.SprintController)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local MovementController = require(script.Parent.Parent.Movement.MovementController)
+local SprintController = require(script.Parent.Parent.Movement.SprintController)
 
 local requestWallRun = ReplicatedStorage.Remotes.RequestWallRun :: RemoteEvent
 local requestWallLeap = ReplicatedStorage.Remotes.RequestWallLeap :: RemoteEvent

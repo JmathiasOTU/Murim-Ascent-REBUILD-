@@ -10,7 +10,7 @@ local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
 
 local requestSprint = ReplicatedStorage.Remotes.RequestSprint :: RemoteEvent
 

@@ -85,6 +85,13 @@ type PlayerMovementRecord = {
 	dashCooldowns: { [string]: newDashCooldownStates.DashCooldownState },
 	lastDashCategory: string,
 	lastAirDashTime: number,
+	-- Ground Dash doubles as the combat Dodge (Combat_Framework_Design_Doc Section 3) -- ends early
+	-- on a roll cancel, not just on MovementConstants.DashDuration elapsing, so it's tracked as its
+	-- own explicit flag/timeout rather than inferred from the speed-exemption bookkeeping above
+	-- (which serves a different, overlapping-but-not-identical anti-speed-hack purpose). Queried by
+	-- HitRegistrationService via IsDashing, injected from ServiceBootstrap.
+	isDashing: boolean,
+	dashEndThread: thread?,
 	-- While now < this, _validatePlayer checks against speedCheckExemptBaseSpeed instead of
 	-- humanoid.WalkSpeed -- covers a dash's own velocity burst, and any other transient (e.g. residual
 	-- walking momentum not yet decayed to a just-lowered WalkSpeed) too fast for WalkSpeed-based
@@ -285,6 +292,11 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 	local rootPart = character:WaitForChild("HumanoidRootPart") :: BasePart
 	humanoid.WalkSpeed = MovementConstants.WalkSpeed
 
+	local existingRecord = self._records[player]
+	if existingRecord and existingRecord.dashEndThread then
+		task.cancel(existingRecord.dashEndThread)
+	end
+
 	self._records[player] = {
 		humanoid = humanoid,
 		rootPart = rootPart,
@@ -300,6 +312,8 @@ function MovementValidationService._onCharacterAdded(self: MovementValidationSer
 		dashCooldowns = newDashCooldownStates(),
 		lastDashCategory = DashCategory.Forward,
 		lastAirDashTime = -math.huge,
+		isDashing = false,
+		dashEndThread = nil,
 		speedCheckExemptUntil = 0,
 		-- Never actually read while speedCheckExemptUntil is 0 (now < 0 is never true) -- WalkSpeed is
 		-- just a sane placeholder rather than leaving it at a meaningless 0.
@@ -353,6 +367,23 @@ function MovementValidationService._onRequestDash(self: MovementValidationServic
 	-- the duration, so it's the correct ceiling rather than a full bypass.
 	record.speedCheckExemptBaseSpeed = MovementConstants.DashPower
 	record.speedCheckExemptReason = SpeedExemptReason.Dash
+
+	-- Doubles as the combat Dodge (Combat_Framework_Design_Doc Section 3) -- IsDashing below.
+	record.isDashing = true
+	if record.dashEndThread then
+		task.cancel(record.dashEndThread)
+	end
+	record.dashEndThread = task.delay(MovementConstants.DashDuration, function()
+		record.dashEndThread = nil
+		record.isDashing = false
+	end)
+end
+
+-- Queried by HitRegistrationService (injected from ServiceBootstrap) to negate a hit the same way
+-- the design doc's old dedicated `Dodging` combat state used to.
+function MovementValidationService.IsDashing(self: MovementValidationService, player: Player): boolean
+	local record = self._records[player]
+	return record ~= nil and record.isDashing
 end
 
 -- Airborne movement is already fully exempt from the speed check (see isAirborne in
@@ -735,6 +766,15 @@ function MovementValidationService._onRequestRollCancel(self: MovementValidation
 		return
 	end
 	record.rollCancelCharges -= 1
+
+	-- Ends the dash's dodge-invulnerability window (isDashing) right now rather than letting it
+	-- linger until the original DashDuration would have elapsed -- a roll cancel is a genuine early
+	-- exit from the dash, not just a speed-check technicality.
+	record.isDashing = false
+	if record.dashEndThread then
+		task.cancel(record.dashEndThread)
+		record.dashEndThread = nil
+	end
 
 	-- The exemption doesn't end at this exact instant: the residual velocity left over from the
 	-- dash doesn't simply stick once set -- Humanoid's own ground controller keeps independently
@@ -1178,6 +1218,10 @@ function MovementValidationService.Init(self: MovementValidationService)
 	Players.PlayerAdded:Connect(onPlayerAdded)
 
 	Players.PlayerRemoving:Connect(function(player: Player)
+		local record = self._records[player]
+		if record and record.dashEndThread then
+			task.cancel(record.dashEndThread)
+		end
 		self._records[player] = nil
 	end)
 

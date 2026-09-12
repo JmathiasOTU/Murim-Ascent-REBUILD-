@@ -60,6 +60,9 @@
         "RequestAttack": {
           "$className": "RemoteEvent"
         },
+        "RequestGuard": {
+          "$className": "RemoteEvent"
+        },
         "NotifyFootstep": {
           "$className": "UnreliableRemoteEvent"
         },

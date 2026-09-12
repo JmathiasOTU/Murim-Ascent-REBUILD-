@@ -9,9 +9,9 @@ local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local sampleSurfaceColor = require(Shared.Utils.SampleSurfaceColor)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local MovementVFXTemplates = require(script.Parent.Parent.VFX.MovementVFXTemplates)
-local QinggongVFXTemplates = require(script.Parent.Parent.VFX.QinggongVFXTemplates)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local MovementVFXTemplates = require(script.Parent.Parent.Parent.VFX.MovementVFXTemplates)
+local QinggongVFXTemplates = require(script.Parent.Parent.Parent.VFX.QinggongVFXTemplates)
 
 local player = Players.LocalPlayer
 

@@ -59,5 +59,30 @@ General cooldown and state validation (Section 3) is necessary but not sufficien
 * **GUI Creation:** Never create `ScreenGui`s or GUI elements via code. Every GUI is hand-built in Studio; scripts only `WaitForChild` into existing GUI instances to control logic.
 * **Data Saving:** All player data must be session-locked on join. Wipes and critical data operations must be atomic, fail-safe operations to prevent data loss, combat-logging, or exploit-driven evasion.
 
-## 9. No Band aid Validation
-* No "Band-Aid" Validation (Strict Root-Cause Resolution): Never artificially pad, inflate, or hardcode arbitrary tolerances into server-side checks (e.g., adding flat values to distance, speed, or time validations) to paper over network latency or desync. This lazy anti-pattern creates over-permissive validation and introduces massive exploit vulnerabilities. Synchronization and latency issues must always be solved at the mathematical root cause—using precise lag compensation, velocity projection, or strict data-driven margins—never by relaxing the server's rules.
+## 9. No Band-Aid Validation
+* **No "Band-Aid" Validation (Strict Root-Cause Resolution):** Never artificially pad, inflate, or hardcode arbitrary tolerances into server-side checks (e.g., adding flat values to distance, speed, or time validations) to paper over network latency or desync. This lazy anti-pattern creates over-permissive validation and introduces massive exploit vulnerabilities. Synchronization and latency issues must always be solved at the mathematical root cause — using precise lag compensation, velocity projection, or strict data-driven margins — never by relaxing the server's rules.
+* **Empirically-Justified Physics Margins Are Not Band-Aids:** This rule targets tolerances added with no underlying justification — a padding value increased repeatedly until complaints stopped, with no measured cause behind it. It does not prohibit a tolerance that accounts for a measured, deterministic engine interaction (e.g., a documented transient from Humanoid's ground controller combining with residual velocity after a dash-cancel). When adding any numeric tolerance, document the measured behavior that justifies its exact value in a comment. If you cannot point to a specific measured cause, it is the band-aid this section warns against.
+
+## 10. Remote Communication Rules
+Section 5 already requires rate-limiting for parry specifically. These rules generalize and complete that requirement.
+
+* **Type-Validate Every Remote Argument, No Exceptions:** Every remote handler validates argument types before use. A malformed or malicious argument type must never reach game logic.
+* **RemoteEvents Only — Never RemoteFunctions:** A client that never responds to a RemoteFunction call hangs the server thread waiting on it, the same category of hazard Section 7's yielding rule exists to prevent. No combat or movement interaction in this game requires a synchronous client response.
+* **Rate-Limit Every Player-Initiated Combat/Movement Remote, Not Just Parry:** A hard cap on accepted-events-per-second, independent of and in addition to any game-logic cooldown (`DashCooldown`, `ParryWhiffCooldown`, etc.). A cooldown only fires under specific game-state conditions (e.g. a miss); a remote-layer rate limit catches macro/script abuse regardless of whether the spammed action would otherwise be legal.
+
+## 11. Physics & Networking Ownership
+* **Server-Authoritative Physics Objects Must Never Be Subject to Automatic Network Ownership:** Roblox automatically assigns network ownership of unanchored physics-simulated parts to a nearby client for performance reasons. For a hitbox proxy, projectile, or any other part whose position the server treats as ground truth, this can let a client influence its trajectory before the server's own check runs. Every such part must either be `Anchored` and moved by script (position/CFrame set directly, no physics simulation), or have its network ownership explicitly set to the server (`SetNetworkOwner(nil)`) and never left to automatic assignment.
+
+## 12. Player State Representation
+* **HP, Posture, and Qi Are Custom Data Profile Values — Never `Humanoid.Health`:** `Humanoid.Health` should be held at a fixed high value (or its regen disabled) purely as a rig-compatibility shell; it is never read as the authoritative health source and never drives game logic.
+* **`Humanoid.Died` Is Not the Defeat Trigger:** The custom HP-reaches-zero check in the relevant validation/registration service drives the `Defeated` FSM state directly. `Humanoid.Died` firing from an unrelated cause (a scripting error, an out-of-bounds kill volume) must not be treated as equivalent to a combat defeat.
+
+## 13. Data Persistence Practices
+Section 8 requires data operations to be "atomic, fail-safe." These are the concrete practices that deliver that guarantee on Roblox.
+
+* **Use `UpdateAsync`, Never a Read-Then-Write Pair:** A separate `GetAsync` followed by `SetAsync` is a race condition waiting to happen across concurrent sessions or server restarts; `UpdateAsync`'s transform-function pattern is the only safe primitive for this.
+* **Retry With Exponential Backoff on DataStore Failure**, with a capped attempt count — never a single fire-and-forget call for anything session-critical.
+* **`game:BindToClose()` Must Attempt a Final Save Before Shutdown**, with a reasonable timeout, so a server restart or shutdown doesn't silently drop the last few minutes of a session — directly relevant to the anti-combat-log design, which depends on a session's outcome being settled before its data is finalized.
+
+## 14. World Streaming
+* **`StreamingEnabled` Is a Deliberate Decision, Not a Default:** Server-side hit detection is unaffected — the server always has the full world and every character loaded regardless of client streaming radius. The risk is entirely client-side: if `StreamingEnabled` is on, a distant player's character (and their hitbox parts) may not have streamed into an attacker's client yet, which can desync client-side prediction/animation feedback even though the server resolves the hit correctly underneath. Decide explicitly whether `StreamingEnabled` is on for this game — and if it is, document the minimum streaming radius relative to realistic combat engagement range — rather than leaving it as an unconsidered default.

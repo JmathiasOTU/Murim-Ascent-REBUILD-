@@ -7,10 +7,10 @@ local RunService = game:GetService("RunService")
 local MovementState = require(ReplicatedStorage.Shared.Enums.MovementState)
 local MovementConstants = require(ReplicatedStorage.Shared.Constants.MovementConstants)
 local onCharacterAdded = require(ReplicatedStorage.Shared.Utils.OnCharacterAdded)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local MovementSounds = require(script.Parent.Parent.Audio.MovementSounds)
-local QinggongSounds = require(script.Parent.Parent.Audio.QinggongSounds)
-local SprintController = require(script.Parent.SprintController)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local MovementSounds = require(script.Parent.Parent.Parent.Audio.MovementSounds)
+local QinggongSounds = require(script.Parent.Parent.Parent.Audio.QinggongSounds)
+local SprintController = require(script.Parent.Parent.Movement.SprintController)
 
 local player = Players.LocalPlayer
 

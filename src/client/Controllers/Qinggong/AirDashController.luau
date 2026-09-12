@@ -10,8 +10,8 @@ local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local hasEnoughQinggong = require(Shared.Utils.HasEnoughQinggong)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local MovementController = require(script.Parent.MovementController)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local MovementController = require(script.Parent.Parent.Movement.MovementController)
 
 local requestAirDash = ReplicatedStorage.Remotes.RequestAirDash :: RemoteEvent
 

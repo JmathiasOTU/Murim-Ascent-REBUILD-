@@ -9,10 +9,10 @@ local Shared = ReplicatedStorage.Shared
 local FootstepConstants = require(Shared.Constants.FootstepConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local sampleSurfaceColor = require(Shared.Utils.SampleSurfaceColor)
-local movementFSM = require(script.Parent.Parent.State.MovementFSM)
-local FootstepSounds = require(script.Parent.Parent.Audio.FootstepSounds)
-local MovementVFXTemplates = require(script.Parent.Parent.VFX.MovementVFXTemplates)
-local SprintController = require(script.Parent.SprintController)
+local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local FootstepSounds = require(script.Parent.Parent.Parent.Audio.FootstepSounds)
+local MovementVFXTemplates = require(script.Parent.Parent.Parent.VFX.MovementVFXTemplates)
+local SprintController = require(script.Parent.Parent.Movement.SprintController)
 
 local notifyFootstep = ReplicatedStorage.Remotes.NotifyFootstep :: UnreliableRemoteEvent
 local playFootstepSFX = ReplicatedStorage.Remotes.PlayFootstepSFX :: UnreliableRemoteEvent
