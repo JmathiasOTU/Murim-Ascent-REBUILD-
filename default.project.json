@@ -33,6 +33,9 @@
         "RequestRollCancel": {
           "$className": "RemoteEvent"
         },
+        "RequestDashInterrupt": {
+          "$className": "RemoteEvent"
+        },
         "RequestSlide": {
           "$className": "RemoteEvent"
         },

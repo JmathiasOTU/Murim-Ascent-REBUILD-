@@ -19,6 +19,7 @@ local MovementController = require(script.Parent.MovementController)
 
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent
 local requestRollCancel = ReplicatedStorage.Remotes.RequestRollCancel :: RemoteEvent
+local requestDashInterrupt = ReplicatedStorage.Remotes.RequestDashInterrupt :: RemoteEvent
 
 local player = Players.LocalPlayer
 
@@ -42,6 +43,7 @@ export type DashController = typeof(setmetatable(
 		_dashStartTime: number,
 		_rollCancelCharges: number,
 		_rollCancelChargeRegenStart: number,
+		_rollCancelling: boolean,
 	},
 	DashController
 ))
@@ -66,6 +68,7 @@ function DashController.new(): DashController
 		_dashStartTime = -math.huge,
 		_rollCancelCharges = MovementConstants.RollCancelMaxCharges,
 		_rollCancelChargeRegenStart = os.clock(),
+		_rollCancelling = false,
 	}, DashController)
 
 	return self
@@ -89,7 +92,16 @@ end
 -- an early interruption like a jump-cancel taking the FSM straight to Jumping -- so the velocity
 -- constraint never keeps steering the character after some other controller has taken over.
 function DashController._stopPhysics(self: DashController, humanoid: Humanoid, rootPart: BasePart)
+	-- The natural-timeout path already nils _dashEndThread (in _beginDash's own callback) before ever
+	-- reaching here, so a non-nil value at this point means Dashing ended early -- captured before
+	-- cancelling it below, since that call is what nils it.
+	local wasEarlyExit = self._dashEndThread ~= nil
 	self:_cancelDashEndThread()
+
+	if wasEarlyExit and not self._rollCancelling then
+		requestDashInterrupt:FireServer()
+	end
+	self._rollCancelling = false
 
 	if self._steerConnection then
 		self._steerConnection:Disconnect()
@@ -227,6 +239,7 @@ function DashController._tryRollCancel(self: DashController)
 		cooldown.lastDashCooldownResetAt = now
 	end
 
+	self._rollCancelling = true
 	requestRollCancel:FireServer()
 	movementFSM:TransitionTo(MovementState.DodgeCancelling)
 

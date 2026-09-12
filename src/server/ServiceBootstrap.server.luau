@@ -22,5 +22,5 @@ CombatValidationService:Init()
 -- MovementValidationService and HitRegistrationService have no existing require relationship
 -- either way, so this composition lives here rather than introducing one.
 HitRegistrationService:SetIsDodgingQuery(function(player: Player): boolean
-	return MovementValidationService:IsDashing(player)
+	return MovementValidationService:IsDashInvulnerable(player)
 end)
