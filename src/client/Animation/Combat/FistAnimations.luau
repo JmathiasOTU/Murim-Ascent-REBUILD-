@@ -15,6 +15,8 @@ local FistAnimations: { [string]: Animation } = table.freeze({
 	M1_2 = fistFolder:WaitForChild("M1_2") :: Animation,
 	M1_3 = fistFolder:WaitForChild("M1_3") :: Animation,
 	M1_4 = fistFolder:WaitForChild("M1_4") :: Animation,
+	RunningAttack = fistFolder:WaitForChild("RunningAttack") :: Animation,
+	Critical = fistFolder:WaitForChild("Critical") :: Animation,
 })
 
 return FistAnimations

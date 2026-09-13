@@ -63,6 +63,12 @@
         "RequestAttack": {
           "$className": "RemoteEvent"
         },
+        "RequestCriticalAttack": {
+          "$className": "RemoteEvent"
+        },
+        "RequestFeint": {
+          "$className": "RemoteEvent"
+        },
         "RequestGuard": {
           "$className": "RemoteEvent"
         },

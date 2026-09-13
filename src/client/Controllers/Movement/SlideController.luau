@@ -8,8 +8,10 @@ local RunService = game:GetService("RunService")
 local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local MovementConstants = require(Shared.Constants.MovementConstants)
+local CombatConstants = require(Shared.Constants.CombatConstants)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local combatFSM = require(script.Parent.Parent.Parent.State.CombatFSM)
 local MovementController = require(script.Parent.MovementController)
 local SprintController = require(script.Parent.SprintController)
 
@@ -220,6 +222,12 @@ function SlideController._beginSlide(self: SlideController, rootPart: BasePart)
 end
 
 function SlideController._tryStartSlide(self: SlideController)
+	-- Cannot break into a slide mid-attack (Combat_Framework_Design_Doc Section 4/7), same reasoning
+	-- as DashController's own guard.
+	if CombatConstants.CombatLockedStates[combatFSM:GetState()] then
+		return
+	end
+
 	local currentState = movementFSM:GetState()
 	if currentState ~= MovementState.Running
 		and currentState ~= MovementState.SprintCharging

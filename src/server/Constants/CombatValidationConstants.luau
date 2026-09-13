@@ -15,6 +15,11 @@ local CombatValidationConstants = table.freeze({
 	-- Remote-level floor, same role as MovementValidationConstants.SprintRequestCooldown/
 	-- SlideRequestCooldown/CrouchRequestCooldown for their own toggle remotes.
 	GuardRequestCooldown = 0.1,
+
+	-- Own floor, not shared with MinAttackRequestInterval -- a feint legitimately follows an attack
+	-- request almost immediately (that's the whole point), so throttling it on the same clock as
+	-- starting a new attack would punish normal play, not spam.
+	MinFeintRequestInterval = 0.05,
 })
 
 return CombatValidationConstants

@@ -16,6 +16,8 @@ local JianAnimations: { [string]: Animation } = table.freeze({
 	M1_2 = jianFolder:WaitForChild("M1_2") :: Animation,
 	M1_3 = jianFolder:WaitForChild("M1_3") :: Animation,
 	M1_4 = jianFolder:WaitForChild("M1_4") :: Animation,
+	RunningAttack = jianFolder:WaitForChild("RunningAttack") :: Animation,
+	Critical = jianFolder:WaitForChild("Critical") :: Animation,
 })
 
 return JianAnimations

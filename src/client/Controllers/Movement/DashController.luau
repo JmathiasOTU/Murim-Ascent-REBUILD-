@@ -9,12 +9,14 @@ local Shared = ReplicatedStorage.Shared
 local MovementState = require(Shared.Enums.MovementState)
 local DashCategory = require(Shared.Enums.DashCategory)
 local MovementConstants = require(Shared.Constants.MovementConstants)
+local CombatConstants = require(Shared.Constants.CombatConstants)
 local classifyDashCategory = require(Shared.Utils.ClassifyDashCategory)
 local newDashCooldownStates = require(Shared.Utils.NewDashCooldownStates)
 local DashCategoryMovementStates = require(Shared.Utils.DashCategoryMovementStates)
 local onCharacterAdded = require(Shared.Utils.OnCharacterAdded)
 local regenCharges = require(Shared.Utils.RegenCharges)
 local movementFSM = require(script.Parent.Parent.Parent.State.MovementFSM)
+local combatFSM = require(script.Parent.Parent.Parent.State.CombatFSM)
 local MovementController = require(script.Parent.MovementController)
 
 local requestDash = ReplicatedStorage.Remotes.RequestDash :: RemoteEvent
@@ -190,6 +192,13 @@ function DashController._beginDash(self: DashController, humanoid: Humanoid, roo
 end
 
 function DashController._tryDash(self: DashController, humanoid: Humanoid, rootPart: BasePart)
+	-- Cannot break into Dash mid-attack (Combat_Framework_Design_Doc Section 4/7) -- most concretely,
+	-- Running/Critical Attack's own forward burst and a Dash would otherwise fight over the same
+	-- rootPart's LinearVelocity constraint.
+	if CombatConstants.CombatLockedStates[combatFSM:GetState()] then
+		return
+	end
+
 	local now = os.clock()
 	local category = classifyDashCategory(humanoid.MoveDirection, rootPart.CFrame.LookVector, rootPart.CFrame.RightVector)
 	local cooldown = self._dashCooldowns[category]

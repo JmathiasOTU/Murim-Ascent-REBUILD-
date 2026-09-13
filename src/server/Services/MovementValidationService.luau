@@ -47,6 +47,13 @@ local SpeedExemptReason = table.freeze({
 	FullSprintSettle = "FullSprintSettle" :: SpeedExemptReason,
 	WallLeap = "WallLeap" :: SpeedExemptReason,
 	WallClimbLeap = "WallClimbLeap" :: SpeedExemptReason,
+	-- Granted via GrantSpeedExemption, not one of this file's own request handlers -- covers any
+	-- combat action with a client-predicted movement burst (Running Attack's dash-burst, Critical
+	-- Attack's dash-in), same "client drives the physics, this just raises the ceiling _validatePlayer
+	-- checks the result against" shape as Dash itself, per Combat_Framework_Design_Doc Section 7's
+	-- standing rule. One shared reason regardless of which combat ability granted it -- nothing in
+	-- this file needs to tell them apart from each other the way Dash/RollCancel must be told apart.
+	Combat = "Combat" :: SpeedExemptReason,
 })
 
 type PlayerMovementRecord = {
@@ -387,6 +394,24 @@ function MovementValidationService.IsSprinting(self: MovementValidationService, 
 		return false
 	end
 	return record.isSprinting
+end
+
+-- Public counterpart to this file's own internal grant sites above -- lets an outside server Service
+-- (CombatValidationService, for Running Attack's dash-burst or a Critical Attack's dash-in) register
+-- the same kind of brief, capped speed-check exemption Dash/WallLeap/etc. already grant themselves,
+-- instead of every combat ability reimplementing this (Combat_Framework_Design_Doc Section 7's
+-- standing rule). baseSpeed must be the ability's own real max speed, same "no band-aid" bar as every
+-- other grant site in this file -- never an arbitrary padding value.
+function MovementValidationService.GrantSpeedExemption(self: MovementValidationService, player: Player, duration: number, baseSpeed: number)
+	local record = self._records[player]
+	if not record or not player.Character then
+		return
+	end
+
+	local now = os.clock()
+	record.speedCheckExemptUntil = now + duration
+	record.speedCheckExemptBaseSpeed = baseSpeed
+	record.speedCheckExemptReason = SpeedExemptReason.Combat
 end
 
 -- Queried by HitRegistrationService for dodge-negation and by LagCompensationService for per-tick

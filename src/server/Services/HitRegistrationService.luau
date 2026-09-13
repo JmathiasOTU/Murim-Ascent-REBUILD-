@@ -5,7 +5,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage.Shared
 local CombatState = require(Shared.Enums.CombatState)
-local WeaponTypes = require(Shared.Constants.Weapons.WeaponTypes)
 
 -- TEMP hitbox shape, not per-weapon geometry -- there's no weapon-equip system yet (design doc
 -- Section 13), so there's no real weapon model/Attachment to query against. A forward-offset sphere
@@ -64,6 +63,13 @@ function HitRegistrationService._clearPendingThread(self: HitRegistrationService
 	end
 end
 
+-- Lets CombatValidationService cancel an in-flight hit resolution the instant a Feint interrupts its
+-- own attack's windup (Combat_Framework_Design_Doc Section 4) -- a feinted swing must never actually
+-- check for a hit.
+function HitRegistrationService.CancelPendingHit(self: HitRegistrationService, player: Player)
+	self:_clearPendingThread(player)
+end
+
 -- Proves the server-authoritative hit-detection pipeline in isolation (roadmap step 2/3) -- doesn't
 -- apply damage/posture yet, since no HP/posture resource exists in the combat framework at this
 -- stage (Section 11: deferred to a later content pass). Logs the resolved outcome instead --
@@ -116,12 +122,17 @@ function HitRegistrationService._performHitCheck(
 	end
 end
 
+-- windup is the ONLY field this pipeline actually reads from an attack's data table (everything
+-- else is print-only bookkeeping, per this file's own Section 11 deferral note above) -- taking it
+-- as a plain number instead of a whole WeaponTypes.ComboStepData lets M1 steps, the weapon-agnostic
+-- Running Attack (CombatConstants.RunningAttack), and a per-weapon CriticalAttack (three different,
+-- not-quite-compatible table shapes) all flow through the same function with no widened/union type.
 function HitRegistrationService.ResolveAttack(
 	self: HitRegistrationService,
 	player: Player,
 	weaponId: string,
 	comboStepId: string,
-	stepData: WeaponTypes.ComboStepData
+	windup: number
 )
 	local character = player.Character
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -130,7 +141,7 @@ function HitRegistrationService.ResolveAttack(
 	end
 
 	self:_clearPendingThread(player)
-	self._pendingHitThreads[player] = task.delay(stepData.Windup, function()
+	self._pendingHitThreads[player] = task.delay(windup, function()
 		self._pendingHitThreads[player] = nil
 		self:_performHitCheck(player, character, rootPart, weaponId, comboStepId)
 	end)
