@@ -81,7 +81,13 @@ function AnimationController._setupCharacter(self: AnimationController, characte
 
 	local tracks: { [string]: AnimationTrack } = {}
 	for state, animation in pairs(MovementAnimations) do
-		tracks[state] = animator:LoadAnimation(animation)
+		local track = animator:LoadAnimation(animation)
+		-- Explicitly pinned, not left to whatever Priority is baked into the Studio asset (Combat
+		-- Framework Bugfix Addendum Section 2.4) -- every other Action-priority category in this file
+		-- already sets this in code; the base loop table was the one gap where a re-exported animation
+		-- asset could silently start competing with combat's Action-priority tracks.
+		track.Priority = Enum.AnimationPriority.Movement
+		tracks[state] = track
 	end
 	for state, animation in pairs(QinggongAnimations) do
 		local track = animator:LoadAnimation(animation)
@@ -101,7 +107,9 @@ function AnimationController._setupCharacter(self: AnimationController, characte
 
 	local walkTracks: { [string]: AnimationTrack } = {}
 	for direction, animation in pairs(DirectionalWalkAnimations) do
-		walkTracks[direction] = animator:LoadAnimation(animation)
+		local track = animator:LoadAnimation(animation)
+		track.Priority = Enum.AnimationPriority.Movement
+		walkTracks[direction] = track
 	end
 	self._walkTracks = walkTracks
 	self._activeWalkTrack = nil

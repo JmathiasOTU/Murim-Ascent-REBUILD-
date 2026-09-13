@@ -54,7 +54,7 @@ end
 
 function CombatAnimationController._onComboStepStarted(self: CombatAnimationController, stepId: string)
 	if self._activeTrack then
-		self._activeTrack:Stop(AnimationConstants.DashFadeOutTime)
+		self._activeTrack:Stop(AnimationConstants.ComboChainFadeOutTime)
 	end
 
 	local track = self._tracks[stepId]
@@ -62,7 +62,7 @@ function CombatAnimationController._onComboStepStarted(self: CombatAnimationCont
 		return
 	end
 
-	track:Play(AnimationConstants.DashFadeInTime)
+	track:Play(AnimationConstants.ComboChainFadeInTime)
 	self._activeTrack = track
 end
 
